@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build && node scripts/strip-comments.cjs"
   },
   "dependencies": {
     "vue": "^3.4.0"
