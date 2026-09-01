@@ -2,88 +2,158 @@
  * Hy-MT2 翻译插件 - preload（CommonJS，uTools 规范）
  * 职责：
  *  1. 模型目录管理（用户自定义，utools.showOpenDialog 三端一致）
- *  2. 管理本地 llama-server.exe 推理服务（官方 llama.cpp 构建，b10361 Vulkan 版）
- *  3. 翻译请求转发（/v1/chat/completions，官方 prompt 模板）
+ *  2. 推理引擎安装与升级（v0.4.0 起外置：用户按平台下载 llama.cpp 官方构建，
+ *     插件自动解压到 userData/utools-hy-mt2/engine——插件包因此只含前端代码，KB 级）
+ *  3. 管理本地 llama-server.exe 推理服务（官方 llama.cpp 构建，Vulkan/Metal/CPU 按平台）
+ *  4. 翻译请求转发（/v1/chat/completions，官方 prompt 模板）
  *
- * 引擎说明（2026-08-31 实测改造）：
- *  - 弃用 node-llama-cpp + 系统 Node 服务（模块导入冷启动 24s、预编译二进制在本机
- *    加载 22~40s 或推理异常慢），改为直接 spawn 官方 llama-server.exe：
- *    加载就绪 ~11s、翻译 0.4~1.4s/句、Arc 核显 -ngl 99 加速。
- *  - 生命周期：服务进程常驻，闲置 5 分钟自动睡眠（内存 2.4GB→63MB），来请求自动唤醒
- *    （唤醒+首译实测 ~3.9s）。插件退出不杀进程，无看门狗需求。
+ * 引擎说明（v0.4.0 重构）：
+ *  - 引擎不再内置插件包：llama.cpp 官方 nightly（固定版本，见 ENG_VERSION）打包为
+ *    win-vulkan / win-cpu / macos-arm64 / macos-x64 / ubuntu-x64 等平台资产，
+ *    三端首次使用按平台引导下载（ubrowser 一键下载 或 手动下载后导入压缩包）。
+ *  - 已安装引擎由 engine/version.txt 标记版本，与 ENG_VERSION 不符时引导重装。
+ *  - 安装后流程不变：服务进程常驻，闲置 5 分钟自动睡眠（内存 2.4GB→63MB），
+ *    来请求自动唤醒（唤醒+首译实测 ~3.9s）。插件退出不杀进程。
  */
 const { spawn, execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
+const { unpackArchive } = require('./engine-unpack.js')
 
 const FIXED_PORT = 18155
 const SLEEP_IDLE_SECONDS = 300 // 闲置 5 分钟自动睡眠（权重出内存）
 const MAX_TOKENS = 1024
 
-// 推理引擎目录：打包安装时插件位于 asar 归档内，exe 无法直接执行（spawn ENOENT），
-// 首次运行需把 server/llama 释放到 userData/utools-hy-mt2/engine 再启动；
-// 开发者模式（直读 dist）无此问题，直接用包内目录。
-function bundledEngineDir() { return path.join(__dirname, 'server', 'llama') }
-function engineInstallDir() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine') }
-function inAsar() {
-  if (process.env.HY_MT2_FORCE_ASAR === '1') return true // 测试钩子
-  return __dirname.split(path.sep).some((s) => s.endsWith('.asar'))
+// ---- 推理引擎（v0.4.0 外置安装）----
+// 引擎安装于 userData/utools-hy-mt2/engine（version.txt 标记版本，与 ENG_VERSION 不符即引导重装）。
+// 官方每日构建（nightly）固定版本：升级引擎 = 改 ENG_VERSION 一处（链接自动跟随）。
+// 注意：llama.cpp 自 2026-08 起不再发布"稳定版"，GitHub releases 上 nightly 标签即唯一分发渠道。
+const ENG_VERSION = 'b10734'
+const ENG_BASE = 'https://github.com/ggml-org/llama.cpp/releases/download/' + ENG_VERSION
+const ENG_PACKS = {
+  'win-vulkan-x64': { label: 'Windows x64（Vulkan GPU 加速）', file: `llama-${ENG_VERSION}-bin-win-vulkan-x64.zip`, exe: 'llama-server.exe', size: '33.5MB' },
+  'win-cpu-x64': { label: 'Windows x64（CPU，无独显备用）', file: `llama-${ENG_VERSION}-bin-win-cpu-x64.zip`, exe: 'llama-server.exe', size: '17.5MB' },
+  'win-cpu-arm64': { label: 'Windows ARM64（CPU）', file: `llama-${ENG_VERSION}-bin-win-cpu-arm64.zip`, exe: 'llama-server.exe', size: '11.4MB' },
+  'macos-arm64': { label: 'macOS Apple Silicon（Metal 加速）', file: `llama-${ENG_VERSION}-bin-macos-arm64.tar.gz`, exe: 'llama-server', size: '10.6MB' },
+  'macos-x64': { label: 'macOS Intel（Metal 加速）', file: `llama-${ENG_VERSION}-bin-macos-x64.tar.gz`, exe: 'llama-server', size: '10.6MB' },
+  'ubuntu-x64': { label: 'Linux x64（CPU）', file: `llama-${ENG_VERSION}-bin-ubuntu-x64.tar.gz`, exe: 'llama-server', size: '15.9MB' },
+  'ubuntu-arm64': { label: 'Linux ARM64（CPU，实验性）', file: `llama-${ENG_VERSION}-bin-ubuntu-arm64.tar.gz`, exe: 'llama-server', size: '12.7MB' },
 }
+function engineTarget() {
+  const p = process.platform, a = process.arch
+  if (p === 'win32') return a === 'arm64' ? 'win-cpu-arm64' : 'win-vulkan-x64'
+  if (p === 'darwin') return a === 'arm64' ? 'macos-arm64' : 'macos-x64'
+  if (p === 'linux') return a === 'arm64' ? 'ubuntu-arm64' : 'ubuntu-x64'
+  return null
+}
+function engineInstallDir() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine') }
+function engineExeName() { return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server' }
 let engineDirCache = null
 
 function writeEngineError(msg) {
   try {
     fs.mkdirSync(path.join(utools.getPath('userData'), 'utools-hy-mt2'), { recursive: true })
     fs.writeFileSync(path.join(utools.getPath('userData'), 'utools-hy-mt2', 'last-engine-error.txt'),
-      new Date().toLocaleString() + '\n' + msg.replace(/\x1b\[[0-9;]*m/g, '') + '\n\n--- stderr ---\n' + errLogTail.replace(/\x1b\[[0-9;]*m/g, ''), 'utf8')
+      new Date().toLocaleString() + '\n' + msg.replace(/\x1b\[[0-9;]*m/g, '') + '\n\n--- 引擎日志 ---\n' + errLogTail.replace(/\x1b\[[0-9;]*m/g, ''), 'utf8')
   } catch (e) { console.error('[hy-mt2] 写入错误日志失败:', e.message) }
 }
 
-// 逐文件复制（asar 兼容）：fs.cp/promises.cp 不支持 asar 源路径（opendir ENOENT），
-// 必须用被 Electron 打过补丁的 readFileSync（可读 asar）+ writeFileSync（写真实磁盘）
-async function copyEngineDir(src, dest, onPhase) {
-  fs.mkdirSync(dest, { recursive: true })
-  const names = fs.readdirSync(src)
-  let done = 0
-  for (const name of names) {
-    const s = path.join(src, name)
-    const d = path.join(dest, name)
-    if (fs.statSync(s).isDirectory()) {
-      await copyEngineDir(s, d, onPhase)
-    } else {
-      fs.writeFileSync(d, fs.readFileSync(s))
-      done++
-      if (onPhase && done % 4 === 0) onPhase(`释放引擎中 ${done}/${names.length}...`)
-      await new Promise((r) => setTimeout(r, 0)) // 让出事件循环，状态文本可刷新
-    }
+// 引擎状态快照（UI 决定是否引导安装）
+function engineInfo() {
+  const key = engineTarget()
+  const t = key ? ENG_PACKS[key] : null
+  const dir = engineInstallDir()
+  let marker = ''
+  try { marker = fs.readFileSync(path.join(dir, 'version.txt'), 'utf8').trim() } catch {}
+  const exe = t ? path.join(dir, t.exe) : null
+  const installed = !!(exe && fs.existsSync(exe) && marker === ENG_VERSION)
+  return {
+    installed, marker, engineDir: dir, platform: process.platform + '/' + process.arch,
+    version: ENG_VERSION,
+    target: t ? { key, label: t.label, exe: t.exe, size: t.size, url: ENG_BASE + '/' + t.file } : null,
+    // 国内加速镜像（官方直链不通时浏览器手动下载用，前缀式代理）
+    mirrors: [ENG_BASE, 'https://gh-proxy.com/' + ENG_BASE, 'https://ghfast.top/' + ENG_BASE].map((b) => b + '/' + (t ? t.file : '')),
   }
 }
 
-async function ensureEngine(onPhase) {
-  if (engineDirCache) return engineDirCache
-  if (!inAsar()) { engineDirCache = bundledEngineDir(); return engineDirCache }
-  const dest = engineInstallDir()
-  let version = ''
-  try { version = JSON.parse(fs.readFileSync(path.join(__dirname, 'plugin.json'), 'utf8')).version || '' } catch {}
-  const exe = path.join(dest, 'llama-server.exe')
-  let marker = ''
-  try { marker = fs.readFileSync(path.join(dest, 'version.txt'), 'utf8').trim() } catch {}
-  if (!fs.existsSync(exe) || marker !== version) {
+// 安装压缩包 → 解压到 engine 目录（先解到同盘 tmp，校验通过后整目录换入）
+function installEngineArchive(archive, t, onPhase) {
+  const dir = engineInstallDir()
+  const tmp = dir + '.tmp-' + Date.now()
+  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {} }
+  return new Promise((resolve, reject) => {
     try {
-      if (onPhase) onPhase('释放引擎中...')
-      fs.rmSync(dest, { recursive: true, force: true })
-      fs.mkdirSync(path.dirname(dest), { recursive: true })
-      await copyEngineDir(bundledEngineDir(), dest, onPhase)
-      fs.writeFileSync(path.join(dest, 'version.txt'), version, 'utf8')
+      fs.rmSync(tmp, { recursive: true, force: true })
+      fs.mkdirSync(tmp, { recursive: true })
+      onPhase && onPhase('解压引擎中...')
+      unpackArchive(archive, tmp)
+      const exe = path.join(tmp, t.exe)
+      if (!fs.existsSync(exe)) throw new Error('安装包内未找到 ' + t.exe + '，请确认下载的是「' + t.label + '」版本')
+      if (process.platform !== 'win32') fs.chmodSync(exe, 0o755) // 纯 JS 解压不保留 tar 执行位
+      fs.rmSync(dir, { recursive: true, force: true })
+      fs.renameSync(tmp, dir)
+      fs.writeFileSync(path.join(dir, 'version.txt'), ENG_VERSION, 'utf8')
+      engineDirCache = dir
+      resolve(dir)
     } catch (e) {
-      engineDirCache = null
-      writeEngineError('引擎释放失败: ' + (e && e.stack ? e.stack : e.message))
-      throw new Error('引擎释放失败: ' + e.message)
+      cleanup()
+      writeEngineError('引擎安装失败: ' + (e && e.stack ? e.stack : e.message))
+      reject(new Error('引擎安装失败: ' + e.message))
     }
+  })
+}
+
+// 一键下载并安装（配置当前平台的官方构建；文件已存在且够大则跳过下载直接安装）
+async function downloadEngine(onPhase) {
+  const key = engineTarget()
+  const t = key ? ENG_PACKS[key] : null
+  if (!t) throw new Error('当前平台不受支持: ' + process.platform + '/' + process.arch)
+  const dl = path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine-dl')
+  fs.mkdirSync(dl, { recursive: true })
+  const dest = path.join(dl, t.file)
+  if (!fs.existsSync(dest) || fs.statSync(dest).size < 1024 * 1024) {
+    if (onPhase) onPhase('下载引擎中（' + t.size + '，取决于网速）...')
+    await new Promise((resolve, reject) => {
+      try { utools.ubrowser.download(ENG_BASE + '/' + t.file, dest).run().then(resolve).catch(reject) }
+      catch (e) { reject(e) }
+    })
   }
-  engineDirCache = dest
-  return dest
+  return installEngineArchive(dest, t, onPhase)
+}
+
+// 用户手动下载后导入安装包
+function chooseEngineFile() {
+  return new Promise((resolve) => {
+    const r = utools.showOpenDialog({
+      title: '选择下载好的引擎安装包（.zip 或 .tar.gz）',
+      properties: ['openFile'],
+      filters: [
+        { name: '引擎安装包', extensions: ['zip', 'tgz'] },
+        { name: '压缩包', extensions: ['gz'] },
+      ],
+    })
+    resolve(r && r.length ? r[0] : null)
+  })
+}
+function installEngineFromFile(archive, onPhase) {
+  const key = engineTarget()
+  const t = key ? ENG_PACKS[key] : null
+  if (!t) return Promise.reject(new Error('当前平台不受支持: ' + process.platform + '/' + process.arch))
+  if (!fs.existsSync(archive)) return Promise.reject(new Error('文件不存在: ' + archive))
+  return installEngineArchive(archive, t, onPhase)
+}
+
+// 引擎就绪检查：version.txt 标记与安装产物都在才返回 engine 目录，否则抛错引导安装
+async function ensureEngine(onPhase) {
+  if (engineDirCache) {
+    if (!fs.existsSync(path.join(engineDirCache, engineExeName()))) engineDirCache = null
+    else return engineDirCache
+  }
+  const st = engineInfo()
+  if (st.installed) { engineDirCache = st.engineDir; return engineDirCache }
+  const t = st.target
+  throw new Error('推理引擎未安装（' + ENG_VERSION + (t ? '，' + t.label + ' ' + t.size : '，当前平台暂不支持') + '），请先安装引擎')
 }
 
 // Hy-MT2 官方支持的语种（GitHub README_CN 语言表），value 为 prompt 里使用的中文全称
@@ -218,7 +288,7 @@ function waitModelReady(port) {
 // 启动 llama-server.exe（Vulkan 构建：有 Arc 核显走核显，无核显自动回退 CPU）
 function spawnServer(modelPath) {
   return new Promise((resolve, reject) => {
-    const exe = path.join(engineDirCache, 'llama-server.exe')
+    const exe = path.join(engineDirCache, engineExeName())
     if (!fs.existsSync(exe)) return reject(new Error('推理引擎缺失: ' + exe))
     errLogTail = ''
     let settled = false
@@ -317,10 +387,11 @@ function stopServer() {
 // 复进插件毫秒级就绪（睡眠中则预热唤醒 ~3.5s）。需要立即释放时：设置页"更换模型"。
 try { utools.onPluginOut(() => { /* 服务自睡眠，见 SLEEP_IDLE_SECONDS */ }) } catch {}
 
-// Hy-MT2 官方 prompt 模板（GitHub README_CN）：
+// Hy-MT2 官方 prompt 模板（HF 模型卡 README）：
 //   默认：将以下文本翻译为 {目标语言中文全称}，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}
-//   术语：在默认指令之前，每行一条 "{source} 翻译成 {target}"
-//   风格：注意翻译的风格要严格符合【{style}】
+//   术语：指令之前 "参考下面的翻译：\n{source} 翻译成 {target}\n..."
+//   风格：指令行与风格行各占一行（"请将以下文本翻译为{x}。\n注意翻译的风格要严格符合【…】"）
+//   注意风格句不可拼进指令同一行：单字/短句输入时 1.8B 会把风格句当正文一起翻译
 function buildPrompt(text, settings = {}) {
   const tgt = LANGS[settings.tgtLang] || '中文'
   const styleMap = {
@@ -331,10 +402,15 @@ function buildPrompt(text, settings = {}) {
   const parts = []
   const terms = settings.terms || {}
   const termLines = Object.keys(terms).map(k => `${k} 翻译成 ${terms[k]}`)
-  if (termLines.length) parts.push(termLines.join('\n'))
-  let instr = `将以下文本翻译为${tgt}，注意只需要输出翻译后的结果，不要额外解释：`
-  if (settings.style && styleMap[settings.style]) instr += `注意翻译的风格要严格符合【${styleMap[settings.style]}】。`
-  parts.push(instr)
+  if (termLines.length) parts.push('参考下面的翻译：\n' + termLines.join('\n'))
+  const style = settings.style && styleMap[settings.style]
+  // 退化输入保护：超短文本(≤4字符)不加风格行。实测 "翻译"→英语 在风格行存在时
+  // 5/5 把风格句当正文翻译成英文；风格对单字/双词输出本就无意义，直接走默认模板
+  if (style && (text || '').trim().length > 4) {
+    parts.push(`请将以下文本翻译为${tgt}。\n注意翻译的风格要严格符合【${style}】`)
+  } else {
+    parts.push(`将以下文本翻译为${tgt}，注意只需要输出翻译后的结果，不要额外解释：`)
+  }
   parts.push('', text)
   return parts.join('\n')
 }
@@ -361,6 +437,11 @@ function chatTranslate(text, settings) {
 window.preload = {
   getConfig: readCfg,
   saveConfig: writeCfg,
+  // 推理引擎（外置安装）：状态/一键下载/导入安装包/选择文件
+  engineInfo,
+  downloadEngine,
+  installEngineFromFile,
+  chooseEngineFile,
   // 本地文件存储（历史记录等）：渲染层读/增量写
   readStore() { return readStore() },
   writeStore(patch) { return writeStore(patch) },

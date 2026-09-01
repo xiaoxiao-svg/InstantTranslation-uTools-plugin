@@ -1,0 +1,10 @@
+# 依赖与构建临时物
+node_modules/
+*.log
+.DS_Store
+# 大二进制（模型不入库）
+*.gguf
+*.bin
+# 测试残留
+tmp-*.js
+tmp-*.cjs
