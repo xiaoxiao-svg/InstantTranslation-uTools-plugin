@@ -768,8 +768,13 @@ body {
 /* ---- 引擎安装卡（v0.4.0：手动下载链接 + 镜像） ---- */
 .links-title { margin-top: 14px; font-size: 12.5px; color: var(--sub); }
 .copy-hint { margin-top: 10px; }
-.link-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.link-txt { flex: 1; min-width: 0; font-size: 11.5px; color: var(--faint); word-break: break-all; line-height: 1.5; }
+.link-row { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
+.link-txt {
+  flex: 1; min-width: 0; max-width: 100%;
+  font-size: 11.5px; color: var(--faint);
+  white-space: normal; overflow-wrap: anywhere; word-break: break-all; /* 长链接必须可换行（真机见单行省略） */
+  line-height: 1.6; overflow: visible; text-overflow: clip;
+}
 .links-note { margin-top: 10px; font-size: 12px; color: var(--faint); line-height: 1.8; }
 .full-card { display: flex; flex-direction: column; justify-content: center; }
 .full-card.overlay-card { justify-content: flex-start; }
