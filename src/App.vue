@@ -210,17 +210,8 @@ import { ref, reactive, watch } from 'vue'
 
 const p = window.preload
 
-// 窗口高度自适应：设计高 620，按屏幕工作区收缩，避免小屏溢出；
-// 页面本身 height:100vh 精确填满窗口实际高度（544/560/自定义均可），永不出滚动条
-function fitWindowHeight() {
-  try {
-    if (!window.utools || !utools.getPrimaryDisplay || !utools.setExpendHeight) return
-    const wa = utools.getPrimaryDisplay().workArea
-    const desired = Math.min(620, Math.max(480, wa.height - 160))
-    utools.setExpendHeight(desired)
-  } catch {}
-}
-fitWindowHeight()
+// 窗口高度：保持 uTools 默认高度（不再 setExpendHeight 抬窗，v0.4.7）。
+// 页面 height:100vh 精确填满窗口实际高度（544/560/自定义均可），永不出滚动条
 
 // ---- 语种表（与 translate-server.mjs 的 LANGS 保持同一批 code；name 用于界面与 prompt 中文名）----
 const LANGS = [
@@ -594,7 +585,6 @@ initFlow()
 // uTools 后台保留页面（webview 不销毁），重进必须重置，否则残留上次的输入/译文
 try {
   utools.onPluginEnter(({ code, payload }) => {
-    fitWindowHeight()
     view.value = 'main'
     let text = ''
     if (code === 'translate' && typeof payload === 'string') text = payload.trim()
