@@ -50,7 +50,7 @@
           <button class="btn primary" :disabled="!modelDir || downloading" @click="startDownload">下载模型</button>
         </div>
         <div v-if="downloading" class="progress">
-          <div class="progress-bar"><div class="fill" :style="{width: progress+'%'}"></div></div>
+          <div class="progress-bar" v-if="progress > 0"><div class="fill" :style="{width: progress+'%'}"></div></div>
           <span class="progress-text">{{ progressText }}</span>
         </div>
         <p v-if="modelDir" class="path">{{ modelFile }}</p>
@@ -515,14 +515,10 @@ async function startDownload() {
   downloading.value = true
   progress.value = 0
   try {
-    await p.downloadFile(p.getModelUrl(), p.getModelFile(modelDir.value), (rec, tot) => {
-      progress.value = tot ? Math.round((rec / tot) * 100) : 0
-      progressText.value = (rec / 1024 / 1024).toFixed(0) + 'MB / ' + (tot / 1024 / 1024).toFixed(0) + 'MB (' + progress.value + '%)'
-    })
-    await checkModel()
-    if (modelReady.value) preloadModel()
+    await p.openModelDownload() // 系统浏览器下载（hf-mirror 直链），完成后重进插件自动检测
+    progressText.value = '已在系统浏览器打开模型下载（1.08GB）。下载完成后重新进入插件，模型将自动加载'
   } catch (e) {
-    alert('下载失败: ' + e.message)
+    alert('无法打开浏览器: ' + e.message)
   }
   downloading.value = false
 }
@@ -549,17 +545,13 @@ function initFlow() {
   })
 }
 async function installEngine() {
-  engineBusy.value = true
   engineError.value = ''
-  engineStatus.value = '准备下载...'
   try {
-    await p.downloadEngine((phase) => { engineStatus.value = phase })
-    engineReady.value = true
-    initFlow()
+    const r = await p.openEngineDownload()
+    engineStatus.value = '已调用系统浏览器打开下载页（' + (r.size || '') + '）。浏览器下载完成后点「导入安装包」选择该文件；官方链接打不开时，复制下方镜像链接到浏览器'
   } catch (e) {
     engineError.value = e.message
   }
-  engineBusy.value = false
 }
 async function importEngine() {
   engineBusy.value = true
@@ -768,12 +760,12 @@ body {
 /* ---- 引擎安装卡（v0.4.0：手动下载链接 + 镜像） ---- */
 .links-title { margin-top: 14px; font-size: 12.5px; color: var(--sub); }
 .copy-hint { margin-top: 10px; }
-.link-row { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
+.link-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .link-txt {
-  flex: 1; min-width: 0; max-width: 100%;
+  flex: 1; min-width: 0;
   font-size: 11.5px; color: var(--faint);
-  white-space: normal; overflow-wrap: anywhere; word-break: break-all; /* 长链接必须可换行（真机见单行省略） */
-  line-height: 1.6; overflow: visible; text-overflow: clip;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; /* 链接单行显示，超出省略号 */
+  line-height: 1.8;
 }
 .links-note { margin-top: 10px; font-size: 12px; color: var(--faint); line-height: 1.8; }
 .full-card { display: flex; flex-direction: column; justify-content: center; }

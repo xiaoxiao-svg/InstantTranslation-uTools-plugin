@@ -104,33 +104,13 @@ function installEngineArchive(archive, t, onPhase) {
   })
 }
 
-// 一键下载并安装（官方直连失败自动尝试镜像，全部失败则提示手动导入）
-async function downloadEngine(onPhase) {
+// 打开系统浏览器下载当前平台引擎（调用后由用户在浏览器完成下载，回来点「导入安装包」）
+async function openEngineDownload() {
   const key = engineTarget()
   const t = key ? ENG_PACKS[key] : null
   if (!t) throw new Error('当前平台不受支持: ' + process.platform + '/' + process.arch)
-  const dl = path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine-dl')
-  fs.mkdirSync(dl, { recursive: true })
-  const dest = path.join(dl, t.file)
-  if (fs.existsSync(dest) && fs.statSync(dest).size >= 1024 * 1024) {
-    return installEngineArchive(dest, t, onPhase) // 已下载过完整文件，直接安装
-  }
-  const urls = engineInfo().mirrors // [官方, gh-proxy, ghfast]
-  let lastErr = null
-  for (let i = 0; i < urls.length; i++) {
-    if (onPhase) onPhase((i === 0 ? '下载引擎中' : '直连失败，切换镜像 ' + i + ' 下载中') + '（' + t.size + '，取决于网速）...')
-    try {
-      await ubrowserDownload(urls[i], dest)
-      if (fs.existsSync(dest) && fs.statSync(dest).size >= 1024 * 1024) {
-        return installEngineArchive(dest, t, onPhase)
-      }
-      throw new Error('下载文件不完整')
-    } catch (e) {
-      lastErr = e
-      try { fs.rmSync(dest, { force: true }) } catch {}
-    }
-  }
-  throw new Error('下载失败（官方与镜像均不可达）：' + (lastErr && lastErr.message ? lastErr.message : '') + '。请用浏览器打开页面上的链接手动下载后导入')
+  await openExternal(ENG_BASE + '/' + t.file)
+  return { url: ENG_BASE + '/' + t.file, size: t.size }
 }
 
 // 用户手动下载后导入安装包
@@ -245,21 +225,16 @@ function chooseModelDir() {
 }
 
 // ---- HTTP 小工具 ----
-// ubrowser.download 是链式方法：必须先 goto 建立浏览器会话，单独调用会报
-// "需先使用 goto 打开网页"（uTools 7.8.0 实测）。会话页用 release tag 页（渲染页，
-// 避免 goto 资产直链时浏览器自动再下一遍）；download 指定保存路径后 hide 隐藏窗口。
-function ubrowserDownload(url, savePath) {
+// 下载（v0.4.3 起）：一律调用系统默认浏览器（utools.shellOpenExternal，三端一致）。
+// 弃用 ubrowser：内置浏览器体验不可靠（链式 goot 限制 + 弹窗），用户明确否决。
+function openExternal(url) {
   return new Promise((resolve, reject) => {
     try {
-      const releasePage = 'https://github.com/ggml-org/llama.cpp/releases/tag/' + ENG_VERSION
-      utools.ubrowser
-        .goto(releasePage)
-        .download(url, savePath)
-        .hide()
-        .run()
-        .then(() => resolve(savePath))
-        .catch((e) => reject(new Error('下载失败: ' + ((e && e.message) || e))))
-    } catch (e) { reject(e) }
+      utools.shellOpenExternal(url)
+      resolve(true)
+    } catch (e) {
+      reject(new Error('无法调用系统浏览器: ' + e.message))
+    }
   })
 }
 
@@ -466,9 +441,9 @@ function chatTranslate(text, settings) {
 window.preload = {
   getConfig: readCfg,
   saveConfig: writeCfg,
-  // 推理引擎（外置安装）：状态/一键下载/导入安装包/选择文件
+  // 推理引擎（外置安装）：状态/浏览器下载/导入安装包/选择文件
   engineInfo,
-  downloadEngine,
+  openEngineDownload,
   installEngineFromFile,
   chooseEngineFile,
   // 本地文件存储（历史记录等）：渲染层读/增量写
@@ -483,12 +458,10 @@ window.preload = {
   getModelFile(dir) { return path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf') },
   getModelUrl() { return 'https://hf-mirror.com/tencent/Hy-MT2-1.8B-GGUF/resolve/main/Hy-MT2-1.8B-Q4_K_M.gguf' },
   openModelDir(dir) { utools.showItemInFolder(path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf')) },
-  // 官方 ubrowser.download（三端一致，走 uTools 内置浏览器网络栈）；ubrowser 无进度回调，用文案提示
-  async downloadFile(url, dest, onProgress) {
-    if (!fs.existsSync(path.dirname(dest))) fs.mkdirSync(path.dirname(dest), { recursive: true })
-    await ubrowserDownload(url, dest) // 链式 goto→download，模型与引擎同一套下载逻辑
-    if (onProgress) onProgress(100, 100)
-    return dest
+  // 打开系统浏览器下载模型（hf-mirror 直链；下载完成后重新进入插件自动检测加载）
+  async openModelDownload() {
+    await openExternal(getModelUrl())
+    return { ok: true }
   },
   // 预热（进插件调用）：启动/复用服务；睡眠中则唤醒，之后首译无需等待
   // onPhase(phase) 用于状态显示：'启动引擎中...' / '唤醒中...'
