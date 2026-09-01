@@ -47,7 +47,7 @@
         <p class="desc">选择模型存放目录，下载后完全离线可用，三端通用。</p>
         <div class="cfg-actions">
           <button class="btn ghost" @click="chooseDir">选择目录</button>
-          <button class="btn primary" :disabled="!modelDir || downloading" @click="startDownload">下载模型</button>
+          <button class="btn primary" :disabled="downloading" @click="startDownload">下载模型</button>
         </div>
         <div v-if="downloading" class="progress">
           <div class="progress-bar" v-if="progress > 0"><div class="fill" :style="{width: progress+'%'}"></div></div>
@@ -511,7 +511,16 @@ async function preloadModel() {
   }
 }
 async function startDownload() {
-  if (!modelDir.value || downloading.value) return
+  if (downloading.value) return
+  // 与引擎一致：按钮随时可点；未选模型目录则先弹目录选择，选中后再开浏览器
+  if (!modelDir.value) {
+    const dir = await p.chooseModelDir()
+    if (!dir) return
+    modelDir.value = dir
+    cfg.modelDir = dir
+    await p.saveConfig(cfg)
+    await checkModel()
+  }
   downloading.value = true
   progress.value = 0
   try {

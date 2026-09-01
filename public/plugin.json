@@ -2,7 +2,7 @@
   "pluginName": "Hy-MT2 翻译",
   "description": "本地离线多语言翻译（腾讯 Hy-MT2-1.8B，35 语互译），模型外置自定义存放",
   "author": "self",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "main": "index.html",
   "preload": "preload.js",
   "logo": "logo.png",

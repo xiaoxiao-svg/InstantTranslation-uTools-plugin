@@ -22,6 +22,8 @@
 | macOS Intel | macos-x64.tar.gz | Metal |
 | Linux x64 | ubuntu-x64.tar.gz | CPU |
 
+## 功能（v0.4.6）
+- 下载模型按钮不再置灰（v0.4.6）：未选模型目录时点击先弹目录选择，选中后自动用系统浏览器打开下载，与引擎下载行为一致
 ## 功能（v0.4.5）
 - 构建改进：dist 移除注释（仅代码），preload/engine-unpack 体积 -15%~16%；注释完整保留在源码中
 ## 功能（v0.4.4）
