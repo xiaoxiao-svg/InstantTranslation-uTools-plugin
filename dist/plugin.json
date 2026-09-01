@@ -1,0 +1,20 @@
+{
+  "pluginName": "Hy-MT2 翻译",
+  "description": "本地离线多语言翻译（腾讯 Hy-MT2-1.8B，35 语互译），模型外置自定义存放",
+  "author": "self",
+  "version": "0.3.6",
+  "main": "index.html",
+  "preload": "preload.js",
+  "logo": "logo.png",
+  "features": [
+    {
+      "code": "translate",
+      "explain": "本地离线翻译（35 语互译）",
+      "cmds": [
+        "翻译",
+        "fy",
+        { "type": "over", "label": "文本翻译", "minLength": 1, "maxLength": 5000 }
+      ]
+    }
+  ]
+}
