@@ -579,16 +579,18 @@ function copyLink(u) {
 initFlow()
 
 // 文字匹配（over）入口：选中文字呼出 uTools 进入插件 → 自动回填并翻译。
-// 坑（v0.3.6 遗留，v0.4.4 修）：uTools 把关键字输入也塞进 payload——输入"翻译"+Enter 时
-// payload 就是"翻译"二字，会被当成待翻译文本回填。规则：payload 等于关键字自身（翻译/fy）
-// 一律视为"进入插件"而非"翻译文本"，清空处理；其余非空文本（选中文字/关键字后剩余文本）才回填翻译。
+// 坑（v0.3.6 遗留，v0.4.4 修，v0.4.9 扩展到运行时派生）：uTools 把关键字输入也塞进 payload——
+// 输入"翻译"+Enter 时 payload 就是"翻译"二字，会被当成待翻译文本回填。
+// 规则：payload 等于任一进入关键字（来自 plugin.json cmds，preload 派生）一律视为"进入插件"而非
+// "翻译文本"，清空处理；其余非空文本（选中文字/关键字后剩余文本）才回填翻译。
 // uTools 后台保留页面（webview 不销毁），重进必须重置，否则残留上次的输入/译文
+const ENTRY_KEYWORDS = new Set((p.entryKeywords && p.entryKeywords()) || ['翻译', 'fy'])
 try {
   utools.onPluginEnter(({ code, payload }) => {
     view.value = 'main'
     let text = ''
     if (code === 'translate' && typeof payload === 'string') text = payload.trim()
-    if (text && text !== '翻译' && text !== 'fy') {
+    if (text && !ENTRY_KEYWORDS.has(text)) {
       result.value = ''
       input.value = text
       if (modelReady.value) translate()

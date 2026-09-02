@@ -31,6 +31,17 @@ function engineTarget() {
   if (p === 'linux') return a === 'arm64' ? 'ubuntu-arm64' : 'ubuntu-x64'
   return null
 }
+
+
+function entryKeywords() {
+  try {
+    const pj = JSON.parse(fs.readFileSync(path.join(__dirname, 'plugin.json'), 'utf8'))
+    const f = (pj.features || []).find((x) => x.code === 'translate')
+    return ((f && f.cmds) || []).filter((c) => typeof c === 'string')
+  } catch {
+    return ['翻译', 'fy']
+  }
+}
 function engineInstallDir() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine') }
 function engineExeName() { return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server' }
 let engineDirCache = null
@@ -430,6 +441,7 @@ window.preload = {
   openEngineDownload,
   installEngineFromFile,
   chooseEngineFile,
+  entryKeywords,
   
   readStore() { return readStore() },
   writeStore(patch) { return writeStore(patch) },

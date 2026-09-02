@@ -47,6 +47,17 @@ function engineTarget() {
   if (p === 'linux') return a === 'arm64' ? 'ubuntu-arm64' : 'ubuntu-x64'
   return null
 }
+
+// 进入关键字（与 plugin.json features[].cmds 字符串项一致，运行时派生，杜绝两处漂移）
+function entryKeywords() {
+  try {
+    const pj = JSON.parse(fs.readFileSync(path.join(__dirname, 'plugin.json'), 'utf8'))
+    const f = (pj.features || []).find((x) => x.code === 'translate')
+    return ((f && f.cmds) || []).filter((c) => typeof c === 'string')
+  } catch {
+    return ['翻译', 'fy']
+  }
+}
 function engineInstallDir() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine') }
 function engineExeName() { return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server' }
 let engineDirCache = null
@@ -446,6 +457,7 @@ window.preload = {
   openEngineDownload,
   installEngineFromFile,
   chooseEngineFile,
+  entryKeywords,
   // 本地文件存储（历史记录等）：渲染层读/增量写
   readStore() { return readStore() },
   writeStore(patch) { return writeStore(patch) },
