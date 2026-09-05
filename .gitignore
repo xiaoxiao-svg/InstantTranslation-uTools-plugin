@@ -8,3 +8,5 @@ node_modules/
 # 测试残留
 tmp-*.js
 tmp-*.cjs
+# 宣传图
+promotion/
