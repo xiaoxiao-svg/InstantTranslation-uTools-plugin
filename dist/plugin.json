@@ -1,8 +1,8 @@
 {
   "pluginName": "即译",
-  "description": "本地离线翻译（腾讯 Hy-MT2-1.8B，35 语互译），选中即译、即译即得，翻译不出本机",
+  "description": "本地离线翻译（腾讯 Hy-MT2 官方模型 1.8B/7B/30B-A3B 可选，35 语互译），选中即译、即译即得，翻译不出本机",
   "author": "self",
-  "version": "0.4.9",
+  "version": "0.5.0",
   "main": "index.html",
   "preload": "preload.js",
   "logo": "logo.png",

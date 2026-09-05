@@ -1,7 +1,9 @@
 /**
  * Hy-MT2 翻译插件 - preload（CommonJS，uTools 规范）
  * 职责：
- *  1. 模型目录管理（用户自定义，utools.showOpenDialog 三端一致）
+ *  1. 模型管理：多参数规格注册表（1.8B/7B/30B-A3B 官方 GGUF 档位，MODELS 一处维护），
+ *     同一目录可共存多个规格，cfg.modelId 决定当前档位（缺省回落 1.8B Q4_K_M，老配置不变）；
+ *     下载走系统浏览器（hf-mirror 直链），本地文件可导入（按文件名匹配档位）
  *  2. 推理引擎安装与升级（v0.4.0 起外置：用户按平台下载 llama.cpp 官方构建，
  *     插件自动解压到 userData/utools-hy-mt2/engine——插件包因此只含前端代码，KB 级）
  *  3. 管理本地 llama-server.exe 推理服务（官方 llama.cpp 构建，Vulkan/Metal/CPU 按平台）
@@ -46,6 +48,43 @@ function engineTarget() {
   if (p === 'darwin') return a === 'arm64' ? 'macos-arm64' : 'macos-x64'
   if (p === 'linux') return a === 'arm64' ? 'ubuntu-arm64' : 'ubuntu-x64'
   return null
+}
+
+// ---- 模型注册表（官方 GGUF 全部可用档位，一处维护）----
+// file 必须是 HF 仓库原样文件名（区分大小写）：7B 的 Q6/Q8 官方前缀是大写 HY-，其余 Hy-，勿"统一"大小写。
+// 下载直链 = MODEL_REPO/<repo>/resolve/main/<file>；30B 另有 Q8_0（29.8GB）过于极端未收录，需要时在此加一行。
+// 体积为文件实际大小（GiB，与 HF LFS 元数据逐字核对过）；ram 为翻译时峰值内存估算（含 2048 ctx 的 kv cache）。
+const MODEL_REPO = 'https://hf-mirror.com/tencent'
+const MODEL_OFFICIAL = 'https://huggingface.co'
+const DEFAULT_MODEL_ID = '1.8b-q4'
+const MODELS = [
+  { id: '1.8b-q4', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q4_K_M.gguf', label: '1.8B · Q4_K_M', size: '1.08GB', ram: '峰值内存约 2.4GB', note: '默认推荐，速度最快' },
+  { id: '1.8b-q6', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q6_K.gguf', label: '1.8B · Q6_K', size: '1.37GB', ram: '峰值内存约 2.8GB', note: '速度不变，质量略高' },
+  { id: '1.8b-q8', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q8_0.gguf', label: '1.8B · Q8_0', size: '1.78GB', ram: '峰值内存约 3.2GB', note: '接近无损' },
+  { id: '7b-q4', repo: 'Hy-MT2-7B-GGUF', file: 'Hy-MT2-7B-Q4_K_M.gguf', label: '7B · Q4_K_M', size: '4.31GB', ram: '峰值内存约 5.5GB', note: '质量明显更高' },
+  { id: '7b-q6', repo: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q6_K.gguf', label: '7B · Q6_K', size: '5.74GB', ram: '峰值内存约 7GB', note: '质量更高' },
+  { id: '7b-q8', repo: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q8_0.gguf', label: '7B · Q8_0', size: '7.43GB', ram: '峰值内存约 8.7GB', note: '接近无损' },
+  { id: '30b-a3b-q4', repo: 'Hy-MT2-30B-A3B-GGUF', file: 'Hy-MT2-30B-A3B-Q4_K_M.gguf', label: '30B-A3B · Q4_K_M', size: '17.0GB', ram: '峰值内存约 19GB', note: '质量最佳；MoE 激活 3B，速度仍快' },
+]
+function modelById(id) { return MODELS.find((m) => m.id === id) || MODELS[0] } // 未知 id（含旧配置无 modelId）回落默认档
+function modelUrl(m, official) { return (official ? MODEL_OFFICIAL + '/tencent/' : MODEL_REPO + '/') + m.repo + '/resolve/main/' + m.file }
+function modelPathIn(dir, m) { return path.join(dir, m.file) }
+function modelInstalled(dir, m) {
+  try { const f = modelPathIn(dir, m); return fs.existsSync(f) && fs.statSync(f).size > 100 * 1024 * 1024 } catch { return false }
+}
+// 同一目录可共存多个规格，cfg.modelId 决定当前用哪个
+function activeModel(cfg) { return modelById(cfg && cfg.modelId) }
+function activeModelPath(cfg) {
+  if (cfg && cfg.modelPath) return cfg.modelPath
+  if (cfg && cfg.modelDir) return modelPathIn(cfg.modelDir, activeModel(cfg))
+  return null
+}
+function sameModelPath(a, b) {
+  if (!a || !b) return false
+  const norm = (p) => path.resolve(String(p))
+  return process.platform === 'win32'
+    ? norm(a).toLowerCase() === norm(b).toLowerCase()
+    : norm(a) === norm(b)
 }
 
 // 进入关键字（与 plugin.json features[].cmds 字符串项一致，运行时派生，杜绝两处漂移）
@@ -289,6 +328,22 @@ async function probePort(port) {
   } catch { return null }
 }
 
+// 查询服务当前加载的模型（/props 的 model_path；老版本/非 llama-server 服务查不到返回 null）
+async function runningModelPath(port) {
+  try {
+    const p = await requestJson(port, 'GET', '/props', null, 1500)
+    return (p.json && p.json.model_path) || null
+  } catch { return null }
+}
+
+// 强杀所有 llama-server（切换模型时端口上可能挂着别的模型，收养前必须清掉）
+function killLlamaServers() {
+  try {
+    if (process.platform === 'win32') execSync('taskkill /F /IM llama-server.exe /T', { windowsHide: true })
+    else execSync('pkill -f llama-server', { windowsHide: true })
+  } catch {}
+}
+
 function waitModelReady(port) {
   return new Promise((resolve, reject) => {
     let tries = 0
@@ -356,13 +411,23 @@ function spawnServer(modelPath) {
   })
 }
 
-// 获取服务端口（复用已运行服务 or 启动新服务）
+// 获取服务端口（复用已运行服务 or 启动新服务；端口上是别的模型时清掉重启，防止收养错模型）
 function startServer(modelPath) {
   return new Promise((resolve, reject) => {
     if (serverPort) return resolve(serverPort)
-    probePort(FIXED_PORT).then((st) => {
+    probePort(FIXED_PORT).then(async (st) => {
       if (st && st.up) {
-        // 已有服务（可能是上一代 preload 启动的），直接收养
+        const cur = await runningModelPath(FIXED_PORT)
+        if (cur && !sameModelPath(cur, modelPath)) {
+          killLlamaServers()
+          const dead = Date.now() + 8000
+          while (Date.now() < dead) {
+            await new Promise((r) => setTimeout(r, 300))
+            if (!(await probePort(FIXED_PORT))) break
+          }
+          return spawnServer(modelPath).then(resolve).catch(reject)
+        }
+        // 同模型（可能是上一代 preload 启动的），直接收养
         serverPort = FIXED_PORT
         waitModelReady(FIXED_PORT).then(() => resolve(FIXED_PORT)).catch(reject)
       } else {
@@ -385,16 +450,14 @@ function stopServer() {
     serverProc = null
     // 给端口释放留点时间
     const dead = Date.now() + 1500
-    const check = setInterval(() => {
-      probePort(FIXED_PORT).then((st) => {
-        if (!(st && st.up) || Date.now() > dead) {
-          clearInterval(check)
-          if (st && st.up) {
-            try { execSync(`taskkill /F /IM llama-server.exe /T`, { windowsHide: true }) } catch {}
+      const check = setInterval(() => {
+        probePort(FIXED_PORT).then((st) => {
+          if (!(st && st.up) || Date.now() > dead) {
+            clearInterval(check)
+            if (st && st.up) killLlamaServers()
           }
-        }
-      })
-    }, 300)
+        })
+      }, 300)
   }
 }
 
@@ -462,36 +525,68 @@ window.preload = {
   readStore() { return readStore() },
   writeStore(patch) { return writeStore(patch) },
   chooseModelDir,
-  modelExists(dir) {
-    if (!dir) return false
-    const f = path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf')
-    return fs.existsSync(f) && fs.statSync(f).size > 100 * 1024 * 1024
+  // 多规格模型：id 缺省一律回落默认档（1.8B Q4_K_M），老配置（storage.json 无 modelId）行为不变
+  listModels(dir) { return MODELS.map((m) => ({ id: m.id, label: m.label, size: m.size, ram: m.ram, note: m.note, file: m.file, installed: modelInstalled(dir, m) })) },
+  modelExists(dir, id) { return !!dir && modelInstalled(dir, modelById(id)) },
+  getModelFile(dir, id) { return dir ? modelPathIn(dir, modelById(id)) : '' },
+  getModelUrl(id) { return modelUrl(modelById(id)) },
+  // 手动下载用链接对：镜像（hf-mirror，国内快）/官方站
+  modelLinks(id) {
+    const m = modelById(id)
+    return { mirror: modelUrl(m), official: modelUrl(m, true), file: m.file, size: m.size }
   },
-  getModelFile(dir) { return path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf') },
-  getModelUrl() { return 'https://hf-mirror.com/tencent/Hy-MT2-1.8B-GGUF/resolve/main/Hy-MT2-1.8B-Q4_K_M.gguf' },
-  openModelDir(dir) { utools.showItemInFolder(path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf')) },
-  // 打开系统浏览器下载模型（hf-mirror 直链；下载完成后重新进入插件自动检测加载）
-  async openModelDownload() {
-    await openExternal(getModelUrl())
-    return { ok: true }
+  openModelDir(dir, id) { utools.showItemInFolder(modelPathIn(dir, modelById(id))) },
+  // 打开系统浏览器下载所选规格（hf-mirror 直链；下载完成后点「导入模型文件」或重进插件自动检测）
+  async openModelDownload(id) {
+    const m = modelById(id)
+    await openExternal(modelUrl(m))
+    return { ok: true, file: m.file, size: m.size }
+  },
+  // 手动下载的文件可能落在下载目录：选文件后拷入模型目录（按文件名匹配官方档位，大小写不敏感）
+  chooseModelFile() {
+    return new Promise((resolve) => {
+      const r = utools.showOpenDialog({
+        title: '选择下载好的模型文件（.gguf）',
+        properties: ['openFile'],
+        filters: [{ name: '模型文件', extensions: ['gguf'] }],
+      })
+      resolve(r && r.length ? r[0] : null)
+    })
+  },
+  importModelFile(src, dir) {
+    if (!dir) throw new Error('请先选择模型存放目录')
+    if (!fs.existsSync(src)) throw new Error('文件不存在: ' + src)
+    const base = path.basename(src)
+    const m = MODELS.find((x) => x.file.toLowerCase() === base.toLowerCase())
+    if (!m) throw new Error('不是官方模型文件：' + base + '（支持的文件名见下载页）')
+    const sz = fs.statSync(src).size
+    if (sz <= 100 * 1024 * 1024) throw new Error(base + ' 只有 ' + (sz / 1048576).toFixed(0) + 'MB，疑似未下载完整')
+    const dest = modelPathIn(dir, m)
+    if (path.resolve(src) !== path.resolve(dest)) fs.copyFileSync(src, dest)
+    return { id: m.id, label: m.label, file: m.file }
   },
   // 预热（进插件调用）：启动/复用服务；睡眠中则唤醒，之后首译无需等待
   // onPhase(phase) 用于状态显示：'启动引擎中...' / '唤醒中...'
   async ensureModel(onPhase) {
-    const cfg = readCfg()
-    const mp = cfg.modelPath || (cfg.modelDir ? path.join(cfg.modelDir, 'Hy-MT2-1.8B-Q4_K_M.gguf') : null)
+    const mp = activeModelPath(readCfg())
     if (!mp) return { ok: false, reason: '未配置模型' }
     try {
       await ensureEngine(onPhase)
       const st0 = await probePort(FIXED_PORT)
-      if (st0 && st0.sleeping) {
-        // 睡眠中：先唤醒（进程还热着，比重启快），避免用户点翻译时才等
-        if (onPhase) onPhase('唤醒中...')
-        await requestJson(FIXED_PORT, 'POST', '/completion', { prompt: 'Hi', n_predict: 1, cache_prompt: false }, 60000)
-        return { ok: true }
+      if (st0 && st0.up) {
+        const cur = await runningModelPath(FIXED_PORT)
+        if (!cur || sameModelPath(cur, mp)) { // 同模型：唤醒/等待即可
+          if (st0.sleeping) {
+            if (onPhase) onPhase('唤醒中...')
+            await requestJson(FIXED_PORT, 'POST', '/completion', { prompt: 'Hi', n_predict: 1, cache_prompt: false }, 60000)
+            return { ok: true }
+          }
+          if (!st0.loading) return { ok: true }
+          await waitModelReady(FIXED_PORT) // 加载中(503)：等就绪
+          return { ok: true }
+        }
+        // 端口上是别的规格：不唤醒不收养，交给 startServer 清掉重启
       }
-      if (st0 && st0.up && !st0.loading) return { ok: true } // 已就绪
-      // 未启动或加载中(503)：启动/收养并等就绪
       if (onPhase) onPhase('启动引擎中...')
       await startServer(mp)
       return { ok: true }
@@ -501,7 +596,7 @@ window.preload = {
   },
   // 翻译（服务可能已睡眠自动唤醒/意外退出则重启，失败后重试一次）
   async translate(text, settings) {
-    const mp = settings.modelPath || (settings.modelDir ? path.join(settings.modelDir, 'Hy-MT2-1.8B-Q4_K_M.gguf') : null)
+    const mp = (settings && settings.modelPath) || activeModelPath(readCfg())
     try {
       await ensureEngine()
       await startServer(mp)

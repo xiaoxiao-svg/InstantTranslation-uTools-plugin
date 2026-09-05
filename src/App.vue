@@ -40,25 +40,53 @@
       </div>
     </div>
 
-    <!-- 首次配置模型（等高页面，不拉伸窗口） -->
+    <!-- 模型配置（首次使用 / 更换规格共用；等高页面，不拉伸窗口） -->
     <div v-else-if="!modelReady" class="card full-card">
       <div class="cfg">
-        <h3>首次使用需配置模型（1.08GB）</h3>
-        <p class="desc">选择模型存放目录，下载后完全离线可用，三端通用。</p>
+        <div class="cfg-head">
+          <h3>选择翻译模型</h3>
+          <button v-if="configBack" class="btn ghost sm" @click="backToMain">返回</button>
+        </div>
+        <p class="desc">官方全家桶任选其一：1.8B 最快够用，7B 更强，30B-A3B 质量最佳。同一目录可存多个规格，之后在设置里随时切换。</p>
+        <div class="model-list">
+          <div v-for="m in models" :key="m.id" class="model-item" :class="{on: pickId===m.id}" @click="pickId=m.id">
+            <span class="mi-radio"></span>
+            <span class="mi-main">
+              <span class="mi-name">{{ m.label }}
+                <span v-if="m.installed" class="mi-badge ok">已安装</span>
+                <span v-else-if="m.id==='1.8b-q4'" class="mi-badge">推荐</span>
+              </span>
+              <span class="mi-meta" :title="m.ram">{{ m.size }} · {{ m.note }}</span>
+            </span>
+          </div>
+        </div>
         <div class="cfg-actions">
           <button class="btn ghost" @click="chooseDir">选择目录</button>
-          <button class="btn primary" :disabled="downloading" @click="startDownload">下载模型</button>
+          <button class="btn ghost" :disabled="importing" @click="importModel">导入模型文件</button>
+          <button class="btn primary" :disabled="downloading || !pickId" @click="startDownload">
+            {{ picked && picked.installed ? '启用所选模型' : '下载所选模型' }}
+          </button>
         </div>
         <div v-if="downloading" class="progress">
-          <div class="progress-bar" v-if="progress > 0"><div class="fill" :style="{width: progress+'%'}"></div></div>
+          <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
           <span class="progress-text">{{ progressText }}</span>
         </div>
-        <p v-if="modelDir" class="path">{{ modelFile }}</p>
+        <p v-if="pickFile" class="path">{{ pickFile }}</p>
+        <template v-if="modelLinks">
+          <p class="links-title">手动下载（官方站直链打不开时用镜像链接）：</p>
+          <div class="link-row" v-for="(u, i) in [modelLinks.mirror, modelLinks.official]" :key="i">
+            <span class="link-txt">{{ u }}</span>
+            <button class="btn ghost sm" @click="copyModelLink(u)">复制</button>
+          </div>
+          <p class="links-note">下载完成后点「导入模型文件」选择该文件（{{ modelLinks.file }}），无需手动挪动目录。</p>
+          <p v-if="copyHint" class="progress-text copy-hint">{{ copyHint }}</p>
+        </template>
       </div>
       <div class="tips">
         <div class="tips-title"><span class="bulb">💡</span>说明</div>
         <div class="tip">支持 35 种语言互译（Hy-MT2 官方语种）。首次启动引擎约 10 秒，之后毫秒~秒级响应。</div>
         <div class="tip">翻译服务闲置 5 分钟自动睡眠（内存降至 ~60MB），再翻译自动唤醒。</div>
+        <div class="tip">7B / 30B-A3B 质量更高但更吃内存（悬停各档位可见内存需求），30B-A3B 建议 16GB 内存以上。</div>
       </div>
     </div>
 
@@ -185,7 +213,7 @@
             </div>
             <textarea class="terms" v-model="termsText" rows="4" placeholder="AI=人工智能&#10;CPU=处理器" @change="saveTerms"></textarea>
             <div class="set-row model-path">
-              <span class="path">{{ modelFile }}</span>
+              <span class="path"><span class="mi-label">{{ activeModelLabel }}</span><br>{{ modelFile }}</span>
               <button class="btn ghost sm" @click="changeModel">更换模型</button>
             </div>
             <div v-if="modelFailed && failReason" class="err-box">
@@ -206,7 +234,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 
 const p = window.preload
 
@@ -304,12 +332,18 @@ function detectLang(text) {
 const cfg = reactive(Object.assign({ style: '日常', terms: {}, autoCopy: false, srcLang: 'auto', tgtLang: 'zh' }, p.getConfig() || {}))
 if (cfg.srcLang === 'en') cfg.srcLang = 'auto' // 旧版默认固定英语，统一升级为自动检测
 const modelDir = ref(cfg.modelDir || null)
-const modelFile = ref(modelDir.value ? p.getModelFile(modelDir.value) : '')
+const modelFile = ref(modelDir.value ? p.getModelFile(modelDir.value, cfg.modelId) : '')
 const modelReady = ref(false)
 const modelFailed = ref(false)
 const downloading = ref(false)
-const progress = ref(0)
 const progressText = ref('')
+// 多参数规格（preload MODELS 注册表驱动；cfg.modelId 指定当前档位，缺省回落 1.8B Q4_K_M）
+const models = ref([])
+const pickId = ref(cfg.modelId || '1.8b-q4')
+const modelLinks = ref(null)
+const configBack = ref(false) // 设置页「更换模型」进来时显示返回按钮，可不切换原样退出
+const importing = ref(false)
+const copyHint = ref('')
 const statusText = ref('检查模型...')
 const failReason = ref('')
 // 引擎安装（v0.4.0 外置：包内无引擎，首次使用时按平台引导安装）
@@ -468,10 +502,24 @@ function saveTerms() {
 watch(autoCopy, (v) => { cfg.autoCopy = v; persistCfg() })
 watch(tgtLang, (v) => { cfg.tgtLang = v; persistCfg() })
 
-// ---- 模型配置 ----
+// ---- 模型配置（多参数规格：同一目录可共存多个 GGUF，激活哪个由 cfg.modelId 决定）----
+const picked = computed(() => models.value.find((m) => m.id === pickId.value))
+const pickFile = computed(() => (modelDir.value && pickId.value) ? p.getModelFile(modelDir.value, pickId.value) : '')
+const activeModelLabel = computed(() => {
+  const m = models.value.find((x) => x.id === (cfg.modelId || '1.8b-q4'))
+  return m ? m.label : '1.8B · Q4_K_M'
+})
+function refreshModels() {
+  models.value = p.listModels(modelDir.value || '')
+  if (!cfg.modelId) { // 老配置升级（无 modelId）：指向第一个已装规格，通常就是原有的 1.8B Q4_K_M
+    const inst = models.value.find((m) => m.installed)
+    if (inst) pickId.value = inst.id
+  }
+}
 async function checkModel() {
-  modelReady.value = p.modelExists(modelDir.value)
-  if (modelDir.value) modelFile.value = p.getModelFile(modelDir.value)
+  modelReady.value = !!modelDir.value && p.modelExists(modelDir.value, cfg.modelId)
+  if (modelDir.value) modelFile.value = p.getModelFile(modelDir.value, cfg.modelId)
+  refreshModels()
 }
 async function chooseDir() {
   const dir = await p.chooseModelDir()
@@ -502,32 +550,82 @@ async function preloadModel() {
   }
 }
 async function startDownload() {
-  if (downloading.value) return
-  // 与引擎一致：按钮随时可点；未选模型目录则先弹目录选择，选中后再开浏览器
+  if (downloading.value || !pickId.value) return
+  // 所选规格已装好 → 直接启用，无需下载
+  if (picked.value && picked.value.installed) return activateModel(pickId.value)
+  if (!modelDir.value) {
+    // 与引擎一致：按钮随时可点；未选模型目录则先弹目录选择，选中后再开浏览器
+    const dir = await p.chooseModelDir()
+    if (!dir) return
+    modelDir.value = dir
+    cfg.modelDir = dir
+    await p.saveConfig(cfg)
+    refreshModels()
+  }
+  cfg.modelId = pickId.value // 记住正在下载的规格：重进插件时 checkModel 检查的就是它
+  await p.saveConfig(cfg)
+  downloading.value = true
+  try {
+    const r = await p.openModelDownload(pickId.value) // 系统浏览器下载（hf-mirror 直链）
+    modelLinks.value = p.modelLinks(pickId.value)
+    progressText.value = '已在系统浏览器打开下载（' + (r.size || '') + '）。下载完成后点「导入模型文件」选择该文件，或重新进入插件自动识别'
+  } catch (e) {
+    alert('无法打开浏览器: ' + e.message)
+  }
+  downloading.value = false
+}
+// 激活所选规格（已装才可进）：切规格时停掉旧服务，新规格由预热按需拉起
+async function activateModel(id) {
+  const switching = !!cfg.modelId && cfg.modelId !== id
+  pickId.value = id
+  cfg.modelId = id
+  await p.saveConfig(cfg)
+  modelLinks.value = null
+  if (!modelDir.value || !p.modelExists(modelDir.value, id)) return
+  modelFile.value = p.getModelFile(modelDir.value, id)
+  modelReady.value = true
+  view.value = 'main'
+  configBack.value = false
+  loadHistory()
+  if (switching) p.stopServer()
+  preloadModel()
+}
+// 手动导入：浏览器下载通常落在"下载"目录，选文件后由 preload 拷入模型目录并激活
+async function importModel() {
+  if (importing.value) return
   if (!modelDir.value) {
     const dir = await p.chooseModelDir()
     if (!dir) return
     modelDir.value = dir
     cfg.modelDir = dir
     await p.saveConfig(cfg)
-    await checkModel()
+    refreshModels()
   }
-  downloading.value = true
-  progress.value = 0
+  const f = await p.chooseModelFile()
+  if (!f) return
+  importing.value = true
   try {
-    await p.openModelDownload() // 系统浏览器下载（hf-mirror 直链），完成后重进插件自动检测
-    progressText.value = '已在系统浏览器打开模型下载（1.08GB）。下载完成后重新进入插件，模型将自动加载'
+    const r = p.importModelFile(f, modelDir.value)
+    await activateModel(r.id)
   } catch (e) {
-    alert('无法打开浏览器: ' + e.message)
+    alert('导入失败: ' + e.message)
   }
-  downloading.value = false
+  importing.value = false
 }
-async function changeModel() {
+function changeModel() {
+  // 不清 modelDir 也不停服务：列表里可秒切已装规格，点「返回」原样恢复
+  configBack.value = true
   modelReady.value = false
-  modelDir.value = null
-  cfg.modelDir = null
-  await p.saveConfig(cfg)
-  p.stopServer()
+  refreshModels()
+}
+function backToMain() {
+  modelReady.value = p.modelExists(modelDir.value, cfg.modelId)
+  view.value = 'settings' // 从设置页进入的，返回后仍回设置页
+}
+function copyModelLink(u) {
+  utools.copyText(u)
+  copyHint.value = '链接已复制 ✓'
+  setTimeout(() => { if (copyHint.value === '链接已复制 ✓') copyHint.value = '' }, 1500)
 }
 
 // ---- 引擎安装（进入插件第一步：引擎就绪后才进入模型配置/主界面）----
@@ -754,6 +852,7 @@ body {
 .switch.on i::after { transform: translateX(17px); }
 
 /* ---- 首次配置 ---- */
+.cfg { min-height: 0; overflow-y: auto; } /* 下载后追加链接区等内容超高时卡内滚动，不溢出 */
 .cfg h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
 .desc { font-size: 13px; color: var(--sub); margin-bottom: 14px; }
 .cfg-actions { display: flex; gap: 10px; }
@@ -762,6 +861,22 @@ body {
 .fill { height: 100%; background: var(--blue); border-radius: 3px; transition: width .2s; }
 .progress-text { display: block; margin-top: 6px; font-size: 12px; color: var(--faint); }
 .cfg .path { display: block; margin-top: 12px; font-size: 12px; color: var(--faint); word-break: break-all; }
+
+/* ---- 模型规格选择（配置卡） ---- */
+.cfg-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.model-list { margin: 4px 0 14px; display: flex; flex-direction: column; gap: 6px; max-height: 224px; overflow-y: auto; }
+.model-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; flex: none; }
+.model-item:hover { border-color: #c6cbd4; background: #fafbfc; }
+.model-item.on { border-color: var(--blue); background: #f5f7ff; }
+.mi-radio { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #c0c4cc; flex: none; position: relative; }
+.model-item.on .mi-radio { border-color: var(--blue); }
+.model-item.on .mi-radio::after { content: ''; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--blue); }
+.mi-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mi-name { font-size: 13.5px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.mi-meta { font-size: 12px; color: var(--faint); }
+.mi-badge { font-size: 11px; font-weight: 400; color: var(--sub); background: var(--soft); border-radius: 4px; padding: 1px 6px; flex: none; }
+.mi-badge.ok { color: #1f7a4d; background: #e8f5ee; }
+.mi-label { font-size: 13px; color: var(--ink); font-weight: 600; }
 
 /* ---- 引擎安装卡（v0.4.0：手动下载链接 + 镜像） ---- */
 .links-title { margin-top: 14px; font-size: 12.5px; color: var(--sub); }

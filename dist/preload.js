@@ -33,6 +33,43 @@ function engineTarget() {
 }
 
 
+
+
+
+const MODEL_REPO = 'https://hf-mirror.com/tencent'
+const MODEL_OFFICIAL = 'https://huggingface.co'
+const DEFAULT_MODEL_ID = '1.8b-q4'
+const MODELS = [
+  { id: '1.8b-q4', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q4_K_M.gguf', label: '1.8B · Q4_K_M', size: '1.08GB', ram: '峰值内存约 2.4GB', note: '默认推荐，速度最快' },
+  { id: '1.8b-q6', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q6_K.gguf', label: '1.8B · Q6_K', size: '1.37GB', ram: '峰值内存约 2.8GB', note: '速度不变，质量略高' },
+  { id: '1.8b-q8', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q8_0.gguf', label: '1.8B · Q8_0', size: '1.78GB', ram: '峰值内存约 3.2GB', note: '接近无损' },
+  { id: '7b-q4', repo: 'Hy-MT2-7B-GGUF', file: 'Hy-MT2-7B-Q4_K_M.gguf', label: '7B · Q4_K_M', size: '4.31GB', ram: '峰值内存约 5.5GB', note: '质量明显更高' },
+  { id: '7b-q6', repo: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q6_K.gguf', label: '7B · Q6_K', size: '5.74GB', ram: '峰值内存约 7GB', note: '质量更高' },
+  { id: '7b-q8', repo: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q8_0.gguf', label: '7B · Q8_0', size: '7.43GB', ram: '峰值内存约 8.7GB', note: '接近无损' },
+  { id: '30b-a3b-q4', repo: 'Hy-MT2-30B-A3B-GGUF', file: 'Hy-MT2-30B-A3B-Q4_K_M.gguf', label: '30B-A3B · Q4_K_M', size: '17.0GB', ram: '峰值内存约 19GB', note: '质量最佳；MoE 激活 3B，速度仍快' },
+]
+function modelById(id) { return MODELS.find((m) => m.id === id) || MODELS[0] } 
+function modelUrl(m, official) { return (official ? MODEL_OFFICIAL + '/tencent/' : MODEL_REPO + '/') + m.repo + '/resolve/main/' + m.file }
+function modelPathIn(dir, m) { return path.join(dir, m.file) }
+function modelInstalled(dir, m) {
+  try { const f = modelPathIn(dir, m); return fs.existsSync(f) && fs.statSync(f).size > 100 * 1024 * 1024 } catch { return false }
+}
+
+function activeModel(cfg) { return modelById(cfg && cfg.modelId) }
+function activeModelPath(cfg) {
+  if (cfg && cfg.modelPath) return cfg.modelPath
+  if (cfg && cfg.modelDir) return modelPathIn(cfg.modelDir, activeModel(cfg))
+  return null
+}
+function sameModelPath(a, b) {
+  if (!a || !b) return false
+  const norm = (p) => path.resolve(String(p))
+  return process.platform === 'win32'
+    ? norm(a).toLowerCase() === norm(b).toLowerCase()
+    : norm(a) === norm(b)
+}
+
+
 function entryKeywords() {
   try {
     const pj = JSON.parse(fs.readFileSync(path.join(__dirname, 'plugin.json'), 'utf8'))
@@ -273,6 +310,22 @@ async function probePort(port) {
   } catch { return null }
 }
 
+
+async function runningModelPath(port) {
+  try {
+    const p = await requestJson(port, 'GET', '/props', null, 1500)
+    return (p.json && p.json.model_path) || null
+  } catch { return null }
+}
+
+
+function killLlamaServers() {
+  try {
+    if (process.platform === 'win32') execSync('taskkill /F /IM llama-server.exe /T', { windowsHide: true })
+    else execSync('pkill -f llama-server', { windowsHide: true })
+  } catch {}
+}
+
 function waitModelReady(port) {
   return new Promise((resolve, reject) => {
     let tries = 0
@@ -344,8 +397,18 @@ function spawnServer(modelPath) {
 function startServer(modelPath) {
   return new Promise((resolve, reject) => {
     if (serverPort) return resolve(serverPort)
-    probePort(FIXED_PORT).then((st) => {
+    probePort(FIXED_PORT).then(async (st) => {
       if (st && st.up) {
+        const cur = await runningModelPath(FIXED_PORT)
+        if (cur && !sameModelPath(cur, modelPath)) {
+          killLlamaServers()
+          const dead = Date.now() + 8000
+          while (Date.now() < dead) {
+            await new Promise((r) => setTimeout(r, 300))
+            if (!(await probePort(FIXED_PORT))) break
+          }
+          return spawnServer(modelPath).then(resolve).catch(reject)
+        }
         
         serverPort = FIXED_PORT
         waitModelReady(FIXED_PORT).then(() => resolve(FIXED_PORT)).catch(reject)
@@ -369,16 +432,14 @@ function stopServer() {
     serverProc = null
     
     const dead = Date.now() + 1500
-    const check = setInterval(() => {
-      probePort(FIXED_PORT).then((st) => {
-        if (!(st && st.up) || Date.now() > dead) {
-          clearInterval(check)
-          if (st && st.up) {
-            try { execSync(`taskkill /F /IM llama-server.exe /T`, { windowsHide: true }) } catch {}
+      const check = setInterval(() => {
+        probePort(FIXED_PORT).then((st) => {
+          if (!(st && st.up) || Date.now() > dead) {
+            clearInterval(check)
+            if (st && st.up) killLlamaServers()
           }
-        }
-      })
-    }, 300)
+        })
+      }, 300)
   }
 }
 
@@ -446,36 +507,68 @@ window.preload = {
   readStore() { return readStore() },
   writeStore(patch) { return writeStore(patch) },
   chooseModelDir,
-  modelExists(dir) {
-    if (!dir) return false
-    const f = path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf')
-    return fs.existsSync(f) && fs.statSync(f).size > 100 * 1024 * 1024
-  },
-  getModelFile(dir) { return path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf') },
-  getModelUrl() { return 'https://hf-mirror.com/tencent/Hy-MT2-1.8B-GGUF/resolve/main/Hy-MT2-1.8B-Q4_K_M.gguf' },
-  openModelDir(dir) { utools.showItemInFolder(path.join(dir, 'Hy-MT2-1.8B-Q4_K_M.gguf')) },
   
-  async openModelDownload() {
-    await openExternal(getModelUrl())
-    return { ok: true }
+  listModels(dir) { return MODELS.map((m) => ({ id: m.id, label: m.label, size: m.size, ram: m.ram, note: m.note, file: m.file, installed: modelInstalled(dir, m) })) },
+  modelExists(dir, id) { return !!dir && modelInstalled(dir, modelById(id)) },
+  getModelFile(dir, id) { return dir ? modelPathIn(dir, modelById(id)) : '' },
+  getModelUrl(id) { return modelUrl(modelById(id)) },
+  
+  modelLinks(id) {
+    const m = modelById(id)
+    return { mirror: modelUrl(m), official: modelUrl(m, true), file: m.file, size: m.size }
+  },
+  openModelDir(dir, id) { utools.showItemInFolder(modelPathIn(dir, modelById(id))) },
+  
+  async openModelDownload(id) {
+    const m = modelById(id)
+    await openExternal(modelUrl(m))
+    return { ok: true, file: m.file, size: m.size }
+  },
+  
+  chooseModelFile() {
+    return new Promise((resolve) => {
+      const r = utools.showOpenDialog({
+        title: '选择下载好的模型文件（.gguf）',
+        properties: ['openFile'],
+        filters: [{ name: '模型文件', extensions: ['gguf'] }],
+      })
+      resolve(r && r.length ? r[0] : null)
+    })
+  },
+  importModelFile(src, dir) {
+    if (!dir) throw new Error('请先选择模型存放目录')
+    if (!fs.existsSync(src)) throw new Error('文件不存在: ' + src)
+    const base = path.basename(src)
+    const m = MODELS.find((x) => x.file.toLowerCase() === base.toLowerCase())
+    if (!m) throw new Error('不是官方模型文件：' + base + '（支持的文件名见下载页）')
+    const sz = fs.statSync(src).size
+    if (sz <= 100 * 1024 * 1024) throw new Error(base + ' 只有 ' + (sz / 1048576).toFixed(0) + 'MB，疑似未下载完整')
+    const dest = modelPathIn(dir, m)
+    if (path.resolve(src) !== path.resolve(dest)) fs.copyFileSync(src, dest)
+    return { id: m.id, label: m.label, file: m.file }
   },
   
   
   async ensureModel(onPhase) {
-    const cfg = readCfg()
-    const mp = cfg.modelPath || (cfg.modelDir ? path.join(cfg.modelDir, 'Hy-MT2-1.8B-Q4_K_M.gguf') : null)
+    const mp = activeModelPath(readCfg())
     if (!mp) return { ok: false, reason: '未配置模型' }
     try {
       await ensureEngine(onPhase)
       const st0 = await probePort(FIXED_PORT)
-      if (st0 && st0.sleeping) {
+      if (st0 && st0.up) {
+        const cur = await runningModelPath(FIXED_PORT)
+        if (!cur || sameModelPath(cur, mp)) { 
+          if (st0.sleeping) {
+            if (onPhase) onPhase('唤醒中...')
+            await requestJson(FIXED_PORT, 'POST', '/completion', { prompt: 'Hi', n_predict: 1, cache_prompt: false }, 60000)
+            return { ok: true }
+          }
+          if (!st0.loading) return { ok: true }
+          await waitModelReady(FIXED_PORT) 
+          return { ok: true }
+        }
         
-        if (onPhase) onPhase('唤醒中...')
-        await requestJson(FIXED_PORT, 'POST', '/completion', { prompt: 'Hi', n_predict: 1, cache_prompt: false }, 60000)
-        return { ok: true }
       }
-      if (st0 && st0.up && !st0.loading) return { ok: true } 
-      
       if (onPhase) onPhase('启动引擎中...')
       await startServer(mp)
       return { ok: true }
@@ -485,7 +578,7 @@ window.preload = {
   },
   
   async translate(text, settings) {
-    const mp = settings.modelPath || (settings.modelDir ? path.join(settings.modelDir, 'Hy-MT2-1.8B-Q4_K_M.gguf') : null)
+    const mp = (settings && settings.modelPath) || activeModelPath(readCfg())
     try {
       await ensureEngine()
       await startServer(mp)
