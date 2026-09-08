@@ -66,12 +66,12 @@
           <button class="btn primary" :disabled="downloading || !pickId" @click="startDownload">
             {{ picked && picked.installed ? '启用所选模型' : '下载所选模型' }}
           </button>
+          <span v-if="pickFile" class="path" :title="pickFile">{{ pickFile }}</span>
         </div>
         <div v-if="downloading" class="progress">
           <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
           <span class="progress-text">{{ progressText }}</span>
         </div>
-        <p v-if="pickFile" class="path">{{ pickFile }}</p>
         <template v-if="modelLinks">
           <p class="links-title">手动下载（官方站直链打不开时用镜像链接）：</p>
           <div class="link-row" v-for="(u, i) in [modelLinks.mirror, modelLinks.official]" :key="i">
@@ -700,26 +700,59 @@ try {
 </script>
 
 <style>
-:root { --blue: #4a6bfb; --blue-d: #3f5ef0; --ink: #1f2329; --sub: #6b7280; --faint: #9ca3af; --line: #e4e7ed; --soft: #f5f6f8; }
+/* ---- 主题变量（夜间模式跟随 uTools 主题：webview 的 prefers-color-scheme 随之切换，纯 CSS 自动响应）---- */
+:root {
+  color-scheme: light;
+  --blue: #4a6bfb; --blue-d: #3f5ef0;
+  --ink: #1f2329; --sub: #6b7280; --faint: #9ca3af; --disabled: #c0c4cc;
+  --bg: #f4f4f4; --card: #fff; --soft: #f5f6f8;
+  --line: #e4e7ed; --line-soft: #f0f2f5;
+  --hover: #fafbfc; --hover-line: #c6cbd4;
+  --btn-ghost: #4e5969; --placeholder: #a8abb2;
+  --ring: rgba(74, 107, 251, .1);
+  --shadow: 0 1px 2px rgba(16, 24, 40, .04);
+  --seg-on: #fff; --seg-on-shadow: 0 1px 2px rgba(16, 24, 40, .08);
+  --primary-disabled: #b9c6fd;
+  --progress-track: #eef0f4;
+  --model-on: #f5f7ff;
+  --badge-ok: #1f7a4d; --badge-ok-bg: #e8f5ee;
+  --danger: #e64545; --danger-title: #d23f3f; --danger-msg: #a33; --danger-bg: #fdf0f0; --danger-line: #f5c2c2; --danger-hover-bg: #fdecec;
+  --switch-off: #e4e7ed; --switch-off-line: #dcdfe6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --ink: #e6e8eb; --sub: #a1a7b0; --faint: #7d8592; --disabled: #565b64;
+    --bg: #1e2023; --card: #2a2d31; --soft: #24272b;
+    --line: #3f434a; --line-soft: #353940;
+    --hover: #31353b; --hover-line: #565b64;
+    --btn-ghost: #c6cbd3; --placeholder: #5f6470;
+    --ring: rgba(102, 130, 255, .28);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .2);
+    --seg-on: #3d4148; --seg-on-shadow: 0 1px 2px rgba(0, 0, 0, .35);
+    --primary-disabled: #414e8f;
+    --progress-track: #3a3e45;
+    --model-on: rgba(74, 107, 251, .18);
+    --badge-ok: #63c295; --badge-ok-bg: rgba(34, 163, 95, .16);
+    --danger: #ef7070; --danger-title: #ef7070; --danger-msg: #e39a9a; --danger-bg: rgba(230, 69, 69, .1); --danger-line: rgba(230, 69, 69, .32); --danger-hover-bg: rgba(230, 69, 69, .16);
+    --switch-off: #3f434a; --switch-off-line: #4a4f57;
+  }
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-  background: #f4f4f4;
+  background: var(--bg);
   color: var(--ink);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   height: 100%;
   overflow: hidden;
 }
-/* 跟随 uTools 主题（暗色时 prefers-color-scheme: dark 生效） */
-@media (prefers-color-scheme: dark) {
-  body { background: #303133; }
-}
 /* 高度自适应：填满 uTools 窗口实际高度（默认 544/560），切视图高度不变故窗口不拉伸 */
 .container { padding: 16px; max-width: 800px; margin: 0 auto; height: 100vh; min-height: 460px; display: flex; flex-direction: column; gap: 12px; }
 .card {
-  background: #fff; border-radius: 10px; padding: 14px 16px;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+  background: var(--card); border-radius: 10px; padding: 14px 16px;
+  box-shadow: var(--shadow);
 }
 .full-card { flex: 1; min-height: 0; }
 
@@ -735,10 +768,10 @@ body {
 .btn .ic { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .btn.primary { background: var(--blue); color: #fff; font-weight: 500; }
 .btn.primary:hover:not(:disabled) { background: var(--blue-d); }
-.btn.primary:disabled { background: #b9c6fd; cursor: not-allowed; }
-.btn.ghost { background: #fff; border: 1px solid var(--line); color: #4e5969; }
-.btn.ghost:hover:not(:disabled) { border-color: #c6cbd4; background: #fafbfc; }
-.btn.ghost:disabled { background: var(--soft); border-color: var(--soft); color: #c0c4cc; cursor: not-allowed; }
+.btn.primary:disabled { background: var(--primary-disabled); cursor: not-allowed; }
+.btn.ghost { background: var(--card); border: 1px solid var(--line); color: var(--btn-ghost); }
+.btn.ghost:hover:not(:disabled) { border-color: var(--hover-line); background: var(--hover); }
+.btn.ghost:disabled { background: var(--soft); border-color: var(--soft); color: var(--disabled); cursor: not-allowed; }
 .row { display: flex; align-items: center; gap: 8px; }
 .spacer { flex: 1; }
 
@@ -746,27 +779,27 @@ body {
 .io-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .text-zone {
   flex: 1; min-height: 0; position: relative;
-  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card);
   transition: border-color .15s, box-shadow .15s; overflow: hidden;
 }
-.text-zone:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(74, 107, 251, .1); }
+.text-zone:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px var(--ring); }
 .text-zone textarea {
   width: 100%; height: 100%; display: block; resize: none; border: none; background: transparent;
   padding: 12px 14px 30px; font-size: 14px; line-height: 1.75;
   font-family: inherit; color: var(--ink);
 }
-.text-zone textarea::placeholder { color: #a8abb2; }
+.text-zone textarea::placeholder { color: var(--placeholder); }
 .text-zone textarea:focus { outline: none; }
-.count { position: absolute; right: 12px; bottom: 10px; font-size: 12px; color: #a8abb2; pointer-events: none; }
+.count { position: absolute; right: 12px; bottom: 10px; font-size: 12px; color: var(--placeholder); pointer-events: none; }
 .actions { margin-top: 10px; flex: none; }
 
 /* 输出区与输入区同构 */
 .result-scroll { height: 100%; overflow-y: auto; padding: 12px 14px; }
 .result { font-size: 14.5px; line-height: 1.9; white-space: pre-wrap; word-break: break-word; }
-.result.err { color: #e64545; }
+.result.err { color: var(--danger); }
 .placeholder-zone { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
 .ph-line { font-size: 13.5px; color: var(--faint); }
-.ph-sub { font-size: 12px; color: #c0c4cc; }
+.ph-sub { font-size: 12px; color: var(--disabled); }
 
 /* ---- 工具栏（中线） ---- */
 .bar { flex: none; height: 48px; padding-top: 0; padding-bottom: 0; display: flex; align-items: center; gap: 10px; }
@@ -778,14 +811,18 @@ body {
 .lang {
   appearance: none; -webkit-appearance: none;
   height: 30px; padding: 0 26px 0 12px; max-width: 130px;
-  border: 1px solid var(--line); border-radius: 6px; background-color: #fff;
-  font-size: 12.5px; font-family: inherit; color: #4e5969; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background-color: var(--card);
+  font-size: 12.5px; font-family: inherit; color: var(--btn-ghost); cursor: pointer;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 10px center;
   transition: border-color .15s;
 }
-.lang:hover { border-color: #c6cbd4; }
-.lang:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(74, 107, 251, .1); }
+.lang:hover { border-color: var(--hover-line); }
+.lang:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--ring); }
+/* 下拉箭头是 data URI 内联 svg,无法走 CSS 变量,暗色单独换浅色版 */
+@media (prefers-color-scheme: dark) {
+  .lang { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23a1a7b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+}
 
 /* ---- 二级界面（设置/历史）：与主界面等高，内部滚动 ---- */
 .overlay-card { display: flex; flex-direction: column; }
@@ -795,19 +832,19 @@ body {
 .muted { color: var(--faint); font-weight: 400; font-size: 12px; }
 .empty { padding: 40px 0; text-align: center; font-size: 13px; color: var(--faint); background: var(--soft); border-radius: 8px; }
 .hist-list { display: flex; flex-direction: column; }
-.hist-item { display: flex; align-items: center; gap: 10px; padding: 12px 6px; border-bottom: 1px solid #f0f2f5; cursor: pointer; transition: background .12s; }
+.hist-item { display: flex; align-items: center; gap: 10px; padding: 12px 6px; border-bottom: 1px solid var(--line-soft); cursor: pointer; transition: background .12s; }
 .hist-item:last-child { border-bottom: none; }
-.hist-item:hover { background: #fafbfc; }
+.hist-item:hover { background: var(--hover); }
 .hist-texts { flex: 1; min-width: 0; }
 .hist-src { font-size: 12.5px; color: var(--faint); margin-bottom: 4px; word-break: break-all; line-height: 1.5; }
 .hist-dst { font-size: 13.5px; line-height: 1.6; word-break: break-all; }
 .hist-del {
   flex: none; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
-  border: none; border-radius: 6px; background: transparent; color: #c0c4cc; cursor: pointer;
+  border: none; border-radius: 6px; background: transparent; color: var(--disabled); cursor: pointer;
   opacity: 0; transition: opacity .12s, background .12s, color .12s;
 }
 .hist-item:hover .hist-del { opacity: 1; }
-.hist-del:hover { background: #fdecec; color: #e64545; }
+.hist-del:hover { background: var(--danger-hover-bg); color: var(--danger); }
 .hist-del .ic { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 
 /* ---- 设置 ---- */
@@ -819,20 +856,20 @@ body {
   height: 28px; padding: 0 18px; border-radius: 4px; cursor: pointer;
   font-size: 13px; font-family: inherit; transition: all .15s;
 }
-.seg button.on { background: #fff; color: var(--blue); font-weight: 600; box-shadow: 0 1px 2px rgba(16,24,40,.08); }
+.seg button.on { background: var(--seg-on); color: var(--blue); font-weight: 600; box-shadow: var(--seg-on-shadow); }
 .terms {
   width: 100%; min-height: 90px; border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 14px; font-size: 13px; line-height: 1.8; resize: none; display: block;
-  font-family: inherit; color: var(--ink);
+  font-family: inherit; color: var(--ink); background: var(--card);
 }
-.terms:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(74,107,251,.1); }
-.model-path { border-top: 1px solid #f0f2f5; margin-top: 6px; padding-top: 12px; min-height: 0; }
+.terms:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--ring); }
+.model-path { border-top: 1px solid var(--line-soft); margin-top: 6px; padding-top: 12px; min-height: 0; }
 .path { font-size: 12px; color: var(--faint); word-break: break-all; line-height: 1.6; flex: 1; margin-right: 12px; }
-.footnote { margin-top: 12px; padding-top: 10px; border-top: 1px solid #f0f2f5; }
+.footnote { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .footnote p { font-size: 12px; color: var(--faint); line-height: 2; }
-.err-box { margin-top: 12px; padding: 10px 14px; background: #fdf0f0; border: 1px solid #f5c2c2; border-radius: 8px; }
-.err-title { font-size: 12.5px; font-weight: 600; color: #d23f3f; margin-bottom: 4px; }
-.err-msg { font-size: 12px; color: #a33; line-height: 1.7; word-break: break-all; white-space: pre-wrap; }
+.err-box { margin-top: 12px; padding: 10px 14px; background: var(--danger-bg); border: 1px solid var(--danger-line); border-radius: 8px; }
+.err-title { font-size: 12.5px; font-weight: 600; color: var(--danger-title); margin-bottom: 4px; }
+.err-msg { font-size: 12px; color: var(--danger-msg); line-height: 1.7; word-break: break-all; white-space: pre-wrap; }
 .err-hint { font-size: 11.5px; color: var(--faint); margin-top: 6px; }
 
 /* ---- 开关 ---- */
@@ -840,7 +877,7 @@ body {
 .muted-label { font-size: 12.5px; color: var(--sub); }
 .switch { position: relative; display: inline-block; width: 38px; height: 21px; flex: none; cursor: pointer; }
 .switch i {
-  position: absolute; inset: 0; background: #e4e7ed; border: 1px solid #dcdfe6;
+  position: absolute; inset: 0; background: var(--switch-off); border: 1px solid var(--switch-off-line);
   border-radius: 21px; transition: all .2s; box-sizing: border-box;
 }
 .switch i::after {
@@ -855,27 +892,28 @@ body {
 .cfg { min-height: 0; overflow-y: auto; } /* 下载后追加链接区等内容超高时卡内滚动，不溢出 */
 .cfg h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
 .desc { font-size: 13px; color: var(--sub); margin-bottom: 14px; }
-.cfg-actions { display: flex; gap: 10px; }
+.cfg-actions { display: flex; gap: 10px; align-items: center; }
 .progress { margin-top: 14px; }
-.progress-bar { height: 6px; background: #eef0f4; border-radius: 3px; overflow: hidden; }
+.progress-bar { height: 6px; background: var(--progress-track); border-radius: 3px; overflow: hidden; }
 .fill { height: 100%; background: var(--blue); border-radius: 3px; transition: width .2s; }
 .progress-text { display: block; margin-top: 6px; font-size: 12px; color: var(--faint); }
-.cfg .path { display: block; margin-top: 12px; font-size: 12px; color: var(--faint); word-break: break-all; }
+/* 模型文件路径跟在按钮行内,单行超出省略号,不再单独占行撑高配置卡(否则与模型列表出双滚动条) */
+.cfg .path { flex: 1; min-width: 0; font-size: 12px; color: var(--faint); line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- 模型规格选择（配置卡） ---- */
 .cfg-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.model-list { margin: 4px 0 14px; display: flex; flex-direction: column; gap: 6px; max-height: 224px; overflow-y: auto; }
+.model-list { margin: 4px 0 14px; display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; } /* 高度预算留给卡片:规格多时只在列表内滚动,配置卡整体不出滚动条 */
 .model-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; flex: none; }
-.model-item:hover { border-color: #c6cbd4; background: #fafbfc; }
-.model-item.on { border-color: var(--blue); background: #f5f7ff; }
-.mi-radio { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #c0c4cc; flex: none; position: relative; }
+.model-item:hover { border-color: var(--hover-line); background: var(--hover); }
+.model-item.on { border-color: var(--blue); background: var(--model-on); }
+.mi-radio { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--disabled); flex: none; position: relative; }
 .model-item.on .mi-radio { border-color: var(--blue); }
 .model-item.on .mi-radio::after { content: ''; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--blue); }
 .mi-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .mi-name { font-size: 13.5px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
 .mi-meta { font-size: 12px; color: var(--faint); }
 .mi-badge { font-size: 11px; font-weight: 400; color: var(--sub); background: var(--soft); border-radius: 4px; padding: 1px 6px; flex: none; }
-.mi-badge.ok { color: #1f7a4d; background: #e8f5ee; }
+.mi-badge.ok { color: var(--badge-ok); background: var(--badge-ok-bg); }
 .mi-label { font-size: 13px; color: var(--ink); font-weight: 600; }
 
 /* ---- 引擎安装卡（v0.4.0：手动下载链接 + 镜像） ---- */
@@ -896,7 +934,11 @@ body {
 .bulb { font-size: 14px; }
 .tip { font-size: 13px; color: var(--sub); line-height: 2; }
 
-::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-thumb { background: #d4d7de; border-radius: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
+/* ---- 滚动条（日夜统一样式，不随主题变色） ---- */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-track-piece { background-color: transparent; }
+::-webkit-scrollbar-thumb { background-color: #9b97a2; border-radius: 1px; border: 1px solid #9b97a2; box-shadow: inset 0 0 6px rgba(0, 0, 0, .3); }
+::-webkit-scrollbar-thumb:hover { background-color: #676e77; border: 1px solid #676e77; }
+::-webkit-scrollbar-thumb:active { background-color: #4E5969; border: 1px solid #4E5969; }
+::-webkit-scrollbar-corner { background-color: transparent; }
 </style>
