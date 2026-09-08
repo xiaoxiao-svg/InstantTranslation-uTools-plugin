@@ -2,6 +2,7 @@
 node_modules/
 *.log
 .DS_Store
+dist/
 # 大二进制（模型不入库）
 *.gguf
 *.bin
