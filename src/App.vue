@@ -213,11 +213,11 @@
               <div class="seg">
                 <button v-for="s in ['日常','正式','简洁']" :key="s" :class="{on: cfg.style===s}" @click="setStyle(s)">{{ s }}</button>
               </div>
-            </div>
-            <div class="set-row">
-              <span class="set-label">自动复制结果</span>
               <span class="spacer"></span>
-              <span class="switch" :class="{on: autoCopy}" @click="autoCopy = !autoCopy"><i></i></span>
+              <label class="switch-label" @click.prevent="autoCopy = !autoCopy">
+                <span class="muted-label">自动复制结果</span>
+                <span class="switch" :class="{on: autoCopy}"><i></i></span>
+              </label>
             </div>
             <div class="set-row">
               <span class="set-label">术语表</span>
