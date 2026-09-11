@@ -55,19 +55,29 @@ function engineTarget() {
 // 下载直链 = MODEL_REPO/<repo>/resolve/main/<file>；30B 另有 Q8_0（29.8GB）过于极端未收录，需要时在此加一行。
 // 体积为文件实际大小（GiB，与 HF LFS 元数据逐字核对过）；ram 为翻译时峰值内存估算（含 2048 ctx 的 kv cache）。
 const MODEL_REPO = 'https://hf-mirror.com/tencent'
-const MODEL_OFFICIAL = 'https://huggingface.co'
+const MODEL_OFFICIAL = 'https://huggingface.co/tencent'
+// 国内直连首选 ModelScope（魔搭，国内实测 1.5MB/s，hf-mirror 仅 0.4MB/s 且常抽风）。
+// 注意：魔搭只有 1.8B/7B 的 GGUF，30B-A3B 无 GGUF 档（仅 safetensors），故 30B 回落 hf-mirror。
+const MODEL_MS = 'https://www.modelscope.cn/models/Tencent-Hunyuan'
 const DEFAULT_MODEL_ID = '1.8b-q4'
 const MODELS = [
-  { id: '1.8b-q4', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q4_K_M.gguf', label: '1.8B · Q4_K_M', size: '1.08GB', ram: '峰值内存约 2.4GB', note: '默认推荐，速度最快' },
-  { id: '1.8b-q6', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q6_K.gguf', label: '1.8B · Q6_K', size: '1.37GB', ram: '峰值内存约 2.8GB', note: '速度不变，质量略高' },
-  { id: '1.8b-q8', repo: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q8_0.gguf', label: '1.8B · Q8_0', size: '1.78GB', ram: '峰值内存约 3.2GB', note: '接近无损' },
-  { id: '7b-q4', repo: 'Hy-MT2-7B-GGUF', file: 'Hy-MT2-7B-Q4_K_M.gguf', label: '7B · Q4_K_M', size: '4.31GB', ram: '峰值内存约 5.5GB', note: '质量明显更高' },
-  { id: '7b-q6', repo: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q6_K.gguf', label: '7B · Q6_K', size: '5.74GB', ram: '峰值内存约 7GB', note: '质量更高' },
-  { id: '7b-q8', repo: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q8_0.gguf', label: '7B · Q8_0', size: '7.43GB', ram: '峰值内存约 8.7GB', note: '接近无损' },
-  { id: '30b-a3b-q4', repo: 'Hy-MT2-30B-A3B-GGUF', file: 'Hy-MT2-30B-A3B-Q4_K_M.gguf', label: '30B-A3B · Q4_K_M', size: '17.0GB', ram: '峰值内存约 19GB', note: '质量最佳；MoE 激活 3B，速度仍快' },
+  { id: '1.8b-q4', repo: 'Hy-MT2-1.8B-GGUF', ms: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q4_K_M.gguf', label: '1.8B · Q4_K_M', size: '1.08GB', ram: '峰值内存约 2.4GB', note: '默认推荐，速度最快' },
+  { id: '1.8b-q6', repo: 'Hy-MT2-1.8B-GGUF', ms: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q6_K.gguf', label: '1.8B · Q6_K', size: '1.37GB', ram: '峰值内存约 2.8GB', note: '速度不变，质量略高' },
+  { id: '1.8b-q8', repo: 'Hy-MT2-1.8B-GGUF', ms: 'Hy-MT2-1.8B-GGUF', file: 'Hy-MT2-1.8B-Q8_0.gguf', label: '1.8B · Q8_0', size: '1.78GB', ram: '峰值内存约 3.2GB', note: '接近无损' },
+  { id: '7b-q4', repo: 'Hy-MT2-7B-GGUF', ms: 'Hy-MT2-7B-GGUF', file: 'Hy-MT2-7B-Q4_K_M.gguf', label: '7B · Q4_K_M', size: '4.31GB', ram: '峰值内存约 5.5GB', note: '质量明显更高' },
+  { id: '7b-q6', repo: 'Hy-MT2-7B-GGUF', ms: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q6_K.gguf', label: '7B · Q6_K', size: '5.74GB', ram: '峰值内存约 7GB', note: '质量更高' },
+  { id: '7b-q8', repo: 'Hy-MT2-7B-GGUF', ms: 'Hy-MT2-7B-GGUF', file: 'HY-MT2-7B-Q8_0.gguf', label: '7B · Q8_0', size: '7.43GB', ram: '峰值内存约 8.7GB', note: '接近无损' },
+  { id: '30b-a3b-q4', repo: 'Hy-MT2-30B-A3B-GGUF', ms: null, file: 'Hy-MT2-30B-A3B-Q4_K_M.gguf', label: '30B-A3B · Q4_K_M', size: '17.0GB', ram: '峰值内存约 19GB', note: '质量最佳；MoE 激活 3B，速度仍快' },
 ]
 function modelById(id) { return MODELS.find((m) => m.id === id) || MODELS[0] } // 未知 id（含旧配置无 modelId）回落默认档
-function modelUrl(m, official) { return (official ? MODEL_OFFICIAL + '/tencent/' : MODEL_REPO + '/') + m.repo + '/resolve/main/' + m.file }
+// 下载链接分组：国内直连优先（ModelScope → hf-mirror），官方站殿后（需代理）
+function modelUrls(m) {
+  const rows = []
+  if (m.ms) rows.push({ label: 'ModelScope 国内直连（推荐）', url: MODEL_MS + '/' + m.ms + '/resolve/master/' + m.file })
+  rows.push({ label: m.ms ? 'hf-mirror 国内镜像' : 'hf-mirror 国内镜像（推荐）', url: MODEL_REPO + '/' + m.repo + '/resolve/main/' + m.file })
+  rows.push({ label: 'HuggingFace 官方站（需代理）', url: MODEL_OFFICIAL + '/' + m.repo + '/resolve/main/' + m.file })
+  return rows
+}
 function modelPathIn(dir, m) { return path.join(dir, m.file) }
 function modelInstalled(dir, m) {
   try { const f = modelPathIn(dir, m); return fs.existsSync(f) && fs.statSync(f).size > 100 * 1024 * 1024 } catch { return false }
@@ -122,8 +132,12 @@ function engineInfo() {
     installed, marker, engineDir: dir, platform: process.platform + '/' + process.arch,
     version: ENG_VERSION,
     target: t ? { key, label: t.label, exe: t.exe, size: t.size, url: ENG_BASE + '/' + t.file } : null,
-    // 国内加速镜像（官方直链不通时浏览器手动下载用，前缀式代理）
-    mirrors: [ENG_BASE, 'https://gh-proxy.com/' + ENG_BASE, 'https://ghfast.top/' + ENG_BASE].map((b) => b + '/' + (t ? t.file : '')),
+    // 引擎手动下载链接（官方直链需代理，国内建议用加速镜像；实测 ghfast.top 快于 gh-proxy）
+    mirrors: t ? [
+      { label: 'ghfast.top 加速（国内推荐）', url: 'https://ghfast.top/' + ENG_BASE + '/' + t.file },
+      { label: 'gh-proxy.com 加速', url: 'https://gh-proxy.com/' + ENG_BASE + '/' + t.file },
+      { label: 'GitHub 官方直链（需代理）', url: ENG_BASE + '/' + t.file },
+    ] : [],
   }
 }
 
@@ -154,13 +168,14 @@ function installEngineArchive(archive, t, onPhase) {
   })
 }
 
-// 打开系统浏览器下载当前平台引擎（调用后由用户在浏览器完成下载，回来点「导入安装包」）
+// 打开系统浏览器下载当前平台引擎（国内加速镜像优先，GitHub 直链国内不通）
 async function openEngineDownload() {
   const key = engineTarget()
   const t = key ? ENG_PACKS[key] : null
   if (!t) throw new Error('当前平台不受支持: ' + process.platform + '/' + process.arch)
-  await openExternal(ENG_BASE + '/' + t.file)
-  return { url: ENG_BASE + '/' + t.file, size: t.size }
+  const url = 'https://ghfast.top/' + ENG_BASE + '/' + t.file
+  await openExternal(url)
+  return { url, size: t.size }
 }
 
 // 用户手动下载后导入安装包
@@ -533,18 +548,18 @@ window.preload = {
   listModels(dir) { return MODELS.map((m) => ({ id: m.id, label: m.label, size: m.size, ram: m.ram, note: m.note, file: m.file, installed: modelInstalled(dir, m) })) },
   modelExists(dir, id) { return !!dir && modelInstalled(dir, modelById(id)) },
   getModelFile(dir, id) { return dir ? modelPathIn(dir, modelById(id)) : '' },
-  getModelUrl(id) { return modelUrl(modelById(id)) },
-  // 手动下载用链接对：镜像（hf-mirror，国内快）/官方站
+  getModelUrl(id) { return modelUrls(modelById(id))[0].url },
+  // 手动下载用链接清单（ModelScope 国内直连 → hf-mirror → 官方站，逐行给复制按钮）
   modelLinks(id) {
     const m = modelById(id)
-    return { mirror: modelUrl(m), official: modelUrl(m, true), file: m.file, size: m.size }
+    return { rows: modelUrls(m), file: m.file, size: m.size }
   },
   openModelDir(dir, id) { utools.showItemInFolder(modelPathIn(dir, modelById(id))) },
-  // 打开系统浏览器下载所选规格（hf-mirror 直链；下载完成后点「导入模型文件」或重进插件自动检测）
+  // 打开系统浏览器下载所选规格（ModelScope 国内直链；下载完成后点「导入模型文件」或重进插件自动检测）
   async openModelDownload(id) {
     const m = modelById(id)
-    await openExternal(modelUrl(m))
-    return { ok: true, file: m.file, size: m.size }
+    await openExternal(modelUrls(m)[0].url)
+    return { ok: true, file: m.file, size: m.size, url: modelUrls(m)[0].url }
   },
   // 手动下载的文件可能落在下载目录：选文件后拷入模型目录（按文件名匹配官方档位，大小写不敏感）
   chooseModelFile() {

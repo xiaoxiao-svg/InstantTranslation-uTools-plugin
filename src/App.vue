@@ -20,12 +20,17 @@
             <p class="err-msg">{{ engineError }}</p>
             <p class="err-hint">用浏览器打开下方任一链接即可下载，下载完成后点"导入安装包"选择该文件；完整错误见 uTools 用户数据目录 utools-hy-mt2/last-engine-error.txt</p>
           </div>
-          <p class="links-title">手动下载（任选一个链接，浏览器打开，复制链接用右侧按钮）：</p>
-          <div class="link-row" v-for="(u, i) in engineData.mirrors" :key="i">
-            <span class="link-txt">{{ u }}</span>
-            <button class="btn ghost sm" @click="copyLink(u)">复制</button>
-          </div>
-          <p class="links-note">下载后回插件点「导入安装包」选该文件（.zip / .tar.gz）即可，无需手动解压；镜像链接为加速通道，官方直连不通时使用。</p>
+          <button class="links-toggle" @click="showEngineLinks = !showEngineLinks">
+            {{ showEngineLinks ? '▾' : '▸' }} 浏览器下载打不开？用这里的手动链接
+          </button>
+          <template v-if="showEngineLinks">
+            <div class="link-row" v-for="(r, i) in engineData.mirrors" :key="i">
+              <span class="link-label">{{ r.label }}</span>
+              <span class="link-txt" :title="r.url">{{ r.url }}</span>
+              <button class="btn ghost sm" @click="copyLink(r.url)">复制</button>
+            </div>
+            <p class="links-note">下载后回插件点「导入安装包」选该文件（.zip / .tar.gz）即可，无需手动解压。</p>
+          </template>
         </template>
         <template v-else>
           <h3>当前平台暂不支持</h3>
@@ -42,11 +47,12 @@
 
     <!-- 模型配置（首次使用 / 更换规格共用；等高页面，不拉伸窗口） -->
     <div v-else-if="!modelReady" class="card full-card">
-      <div class="cfg">
-        <div class="cfg-head">
-          <h3>选择翻译模型</h3>
-          <button v-if="configBack" class="btn ghost sm" @click="backToMain">返回</button>
-        </div>
+      <!-- 标题栏固定在滚动区外：展开长链接列表时「返回」始终可点 -->
+      <div class="cfg-head">
+        <h3>选择翻译模型</h3>
+        <button v-if="canBack" class="btn ghost sm" @click="backToMain">返回</button>
+      </div>
+      <div class="cfg cfg-model">
         <p class="desc">官方全家桶任选其一：1.8B 最快够用，7B 更强，30B-A3B 质量最佳。同一目录可存多个规格，之后在设置里随时切换。</p>
         <div class="model-list">
           <div v-for="m in models" :key="m.id" class="model-item" :class="{on: pickId===m.id}" @click="pickId=m.id">
@@ -72,14 +78,20 @@
           <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
           <span class="progress-text">{{ progressText }}</span>
         </div>
+        <p v-else-if="progressText" class="progress-text">{{ progressText }}</p>
         <template v-if="modelLinks">
-          <p class="links-title">手动下载（官方站直链打不开时用镜像链接）：</p>
-          <div class="link-row" v-for="(u, i) in [modelLinks.mirror, modelLinks.official]" :key="i">
-            <span class="link-txt">{{ u }}</span>
-            <button class="btn ghost sm" @click="copyModelLink(u)">复制</button>
-          </div>
-          <p class="links-note">下载完成后点「导入模型文件」选择该文件（{{ modelLinks.file }}），无需手动挪动目录。</p>
-          <p v-if="copyHint" class="progress-text copy-hint">{{ copyHint }}</p>
+          <button class="links-toggle" @click="showModelLinks = !showModelLinks">
+            {{ showModelLinks ? '▾' : '▸' }} 浏览器下载打不开？用这里的手动链接
+          </button>
+          <template v-if="showModelLinks">
+            <div class="link-row" v-for="(r, i) in modelLinks.rows" :key="i">
+              <span class="link-label">{{ r.label }}</span>
+              <span class="link-txt" :title="r.url">{{ r.url }}</span>
+              <button class="btn ghost sm" @click="copyModelLink(r.url)">复制</button>
+            </div>
+            <p class="links-note">下载完成后点「导入模型文件」选择该文件（{{ modelLinks.file }}），无需手动挪动目录。</p>
+            <p v-if="copyHint" class="progress-text copy-hint">{{ copyHint }}</p>
+          </template>
         </template>
       </div>
       <div class="tips">
@@ -211,6 +223,15 @@
               <span class="set-label">术语表</span>
               <span class="muted">每行一条，格式: 术语=译文（对全部语向生效）</span>
             </div>
+            <div class="term-packs">
+              <span class="tp-hint">一键添加行业术语包：</span>
+              <button
+                v-for="pk in TERM_PACKS" :key="pk.id"
+                class="btn ghost sm" :class="{ on: packActive(pk.id) }"
+                :title="packCount(pk) + ' 条术语'" @click="togglePack(pk)"
+              >{{ pk.name }}</button>
+            </div>
+            <p class="tp-note">术语对全部语向生效；翻日常内容时建议取消，避免专业词被强行套用。</p>
             <textarea class="terms" v-model="termsText" rows="4" placeholder="AI=人工智能&#10;CPU=处理器" @change="saveTerms"></textarea>
             <div class="set-row model-path">
               <span class="path"><span class="mi-label">{{ activeModelLabel }}</span><br>{{ modelFile }}</span>
@@ -235,6 +256,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
+import { TERM_PACKS } from './term-packs.js'
 
 const p = window.preload
 
@@ -342,8 +364,13 @@ const models = ref([])
 const pickId = ref(cfg.modelId || '1.8b-q4')
 const modelLinks = ref(null)
 const configBack = ref(false) // 设置页「更换模型」进来时显示返回按钮，可不切换原样退出
+const prevModelId = ref('') // 进入模型配置前的规格，返回时恢复
+// 有已装规格可回才显示返回：首次使用（没装任何模型）时不该有返回
+const canBack = computed(() => configBack.value && !!prevModelId.value && p.modelExists(modelDir.value, prevModelId.value))
 const importing = ref(false)
 const copyHint = ref('')
+const showModelLinks = ref(false) // 手动链接默认折叠：展开时会把配置卡撑出滚动条
+const showEngineLinks = ref(false)
 const statusText = ref('检查模型...')
 const failReason = ref('')
 // 引擎安装（v0.4.0 外置：包内无引擎，首次使用时按平台引导安装）
@@ -491,12 +518,30 @@ watch(srcLang, (v) => {
 // ---- 设置 ----
 function persistCfg() { p.saveConfig(cfg) }
 function setStyle(s) { cfg.style = s; persistCfg() }
+const termsObjToText = (obj) => Object.keys(obj || {}).map(k => k + '=' + obj[k]).join('\n')
 function saveTerms() {
   cfg.terms = {}
   termsText.value.split(/\n|,|，/).forEach(pair => {
     const [k, v] = pair.split('=')
     if (k && v && k.trim() && v.trim()) cfg.terms[k.trim()] = v.trim()
   })
+  persistCfg()
+}
+// ---- 预置术语包（AI/编程/医学/金融/法律，一键添加/移除）----
+// 判定"已启用"= 该包全部术语都已在表中；移除只删本包条目，不动用户自己写的
+function packCount(pk) { return Object.keys(pk.terms).length }
+function packActive(id) {
+  const pk = TERM_PACKS.find(x => x.id === id)
+  if (!pk) return false
+  const t = cfg.terms || {}
+  return Object.keys(pk.terms).every(k => t[k] === pk.terms[k])
+}
+function togglePack(pk) {
+  const t = Object.assign({}, cfg.terms || {})
+  if (packActive(pk.id)) Object.keys(pk.terms).forEach(k => { delete t[k] })
+  else Object.assign(t, pk.terms)
+  cfg.terms = t
+  termsText.value = termsObjToText(t)
   persistCfg()
 }
 watch(autoCopy, (v) => { cfg.autoCopy = v; persistCfg() })
@@ -566,7 +611,7 @@ async function startDownload() {
   await p.saveConfig(cfg)
   downloading.value = true
   try {
-    const r = await p.openModelDownload(pickId.value) // 系统浏览器下载（hf-mirror 直链）
+    const r = await p.openModelDownload(pickId.value) // 系统浏览器下载（ModelScope 国内直链优先）
     modelLinks.value = p.modelLinks(pickId.value)
     progressText.value = '已在系统浏览器打开下载（' + (r.size || '') + '）。下载完成后点「导入模型文件」选择该文件，或重新进入插件自动识别'
   } catch (e) {
@@ -615,11 +660,19 @@ async function importModel() {
 function changeModel() {
   // 不清 modelDir 也不停服务：列表里可秒切已装规格，点「返回」原样恢复
   configBack.value = true
+  prevModelId.value = cfg.modelId // 记住进来前的规格：返回时恢复（下载新规格会改写 cfg.modelId）
   modelReady.value = false
   refreshModels()
 }
 function backToMain() {
+  // 恢复原规格：startDownload 会把 cfg.modelId 改成"正在下载"的规格，
+  // 若直接按 cfg.modelId 判断会把「未安装」当结果 → modelReady 仍为 false → 返回等于没点
+  if (prevModelId.value) cfg.modelId = prevModelId.value
+  pickId.value = cfg.modelId || '1.8b-q4'
+  p.saveConfig(cfg)
   modelReady.value = p.modelExists(modelDir.value, cfg.modelId)
+  modelLinks.value = null
+  progressText.value = ''
   view.value = 'settings' // 从设置页进入的，返回后仍回设置页
 }
 function copyModelLink(u) {
@@ -900,9 +953,16 @@ body {
 /* 模型文件路径跟在按钮行内,单行超出省略号,不再单独占行撑高配置卡(否则与模型列表出双滚动条) */
 .cfg .path { flex: 1; min-width: 0; font-size: 12px; color: var(--faint); line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* 模型配置卡：内部改用弹性布局，让模型列表吸收空间余量。
+   否则「下载后多出的提示行」会把卡片撑出 20 余像素内部滚动条（用户反馈的问题 1）。 */
+.cfg-model { overflow: hidden; display: flex; flex-direction: column; gap: 0; }
+.cfg-model .desc { flex: none; }
+.cfg-model .cfg-actions, .cfg-model .progress, .cfg-model .progress-text, .cfg-model .links-toggle { flex: none; }
+
 /* ---- 模型规格选择（配置卡） ---- */
-.cfg-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.model-list { margin: 4px 0 14px; display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; } /* 高度预算留给卡片:规格多时只在列表内滚动,配置卡整体不出滚动条 */
+.cfg-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; }
+/* 列表弹性收缩：空间够则 200px 封顶，不够则自己内部滚动，绝不把卡片撑出滚动条 */
+.model-list { margin: 4px 0 14px; display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 58px; max-height: 200px; overflow-y: auto; }
 .model-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; flex: none; }
 .model-item:hover { border-color: var(--hover-line); background: var(--hover); }
 .model-item.on { border-color: var(--blue); background: var(--model-on); }
@@ -919,7 +979,15 @@ body {
 /* ---- 引擎安装卡（v0.4.0：手动下载链接 + 镜像） ---- */
 .links-title { margin-top: 14px; font-size: 12.5px; color: var(--sub); }
 .copy-hint { margin-top: 10px; }
+/* 手动链接折叠开关：默认收起，避免展开时把配置卡撑出滚动条 */
+.links-toggle {
+  margin-top: 12px; padding: 0; border: none; background: transparent;
+  color: var(--sub); font-size: 12.5px; font-family: inherit; cursor: pointer;
+  display: block; text-align: left;
+}
+.links-toggle:hover { color: var(--blue); }
 .link-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.link-label { font-size: 12px; color: var(--sub); flex: none; }
 .link-txt {
   flex: 1; min-width: 0;
   font-size: 11.5px; color: var(--faint);
@@ -927,9 +995,15 @@ body {
   line-height: 1.8;
 }
 .links-note { margin-top: 10px; font-size: 12px; color: var(--faint); line-height: 1.8; }
+
+/* ---- 术语包（设置页一键添加） ---- */
+.term-packs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tp-hint { font-size: 12px; color: var(--faint); }
+.term-packs .btn.on { border-color: var(--blue); color: var(--blue); background: var(--model-on); font-weight: 600; }
+.tp-note { font-size: 11.5px; color: var(--faint); margin-bottom: 8px; line-height: 1.6; }
 .full-card { display: flex; flex-direction: column; justify-content: center; }
 .full-card.overlay-card { justify-content: flex-start; }
-.tips { background: var(--soft); border-radius: 8px; padding: 14px 20px; margin-top: 16px; }
+.tips { background: var(--soft); border-radius: 8px; padding: 14px 20px; margin-top: 16px; flex: none; }
 .tips-title { display: flex; align-items: center; gap: 6px; color: var(--blue); font-weight: 600; margin-bottom: 8px; font-size: 13.5px; }
 .bulb { font-size: 14px; }
 .tip { font-size: 13px; color: var(--sub); line-height: 2; }
