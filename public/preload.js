@@ -494,12 +494,55 @@ function buildStyleMessage(settings = {}) {
   return style ? `注意翻译的风格要严格符合【${style}】` : ''
 }
 
+// ---- 术语按需注入 ----
+// 只把当前文本里实际出现的术语写进 prompt。全量注入会随词表线性吃上下文：
+// 真机实测 113 条 = 890 tokens（占 ctx 2048 的 43%），文本超过 ~350 字即超预算；
+// 按需注入后词表规模与上下文占用解耦，词表再大也不拖慢翻译。
+const MAX_INJECTED_TERMS = 60 // 上限保护：术语密集的长文本不至于挤爆上下文
+function normTerm(s) {
+  // 统一小写并把空白/连字符折算成单空格，让 "fine-tuning" / "fine tuning" / "Fine-Tuning" 等价
+  return String(s == null ? '' : s).toLowerCase().replace(/[\s\u00a0\-–—_]+/g, ' ').trim()
+}
+// 拉丁术语按词边界匹配（避免 token 命中 tokenizer / AI 命中 OpenAI），并容忍复数（+s/+es）；
+// 中文等非拉丁术语无词边界概念，直接子串匹配
+function hasTerm(hay, needle) {
+  if (!needle) return false
+  if (!/[a-z]/.test(needle)) return hay.includes(needle)
+  for (const v of [needle, needle + 's', needle + 'es']) {
+    let idx = 0
+    for (;;) {
+      const i = hay.indexOf(v, idx)
+      if (i < 0) break
+      const before = i > 0 ? hay[i - 1] : ' '
+      const after = i + v.length < hay.length ? hay[i + v.length] : ' '
+      if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true
+      idx = i + 1
+    }
+  }
+  return false
+}
+// 命中源侧 → 按原方向注入；命中目标侧（中文源 + en=zh 词表）→ 反方向注入，
+// 给模型"待译语言在前"的对照，比让它自己反推方向更稳
+function matchTerms(text, terms) {
+  const hay = normTerm(text)
+  if (!hay) return []
+  const out = []
+  for (const k of Object.keys(terms || {})) {
+    if (out.length >= MAX_INJECTED_TERMS) break
+    const src = String(k).trim()
+    const dst = String(terms[k] == null ? '' : terms[k]).trim()
+    if (!src || !dst) continue
+    if (hasTerm(hay, normTerm(src))) out.push([src, dst])
+    else if (hasTerm(hay, normTerm(dst))) out.push([dst, src])
+  }
+  return out
+}
+
 function buildPrompt(text, settings = {}) {
   const tgt = LANGS[settings.tgtLang] || '中文'
   const parts = []
-  const terms = settings.terms || {}
-  const termLines = Object.keys(terms).map(k => `${k} 翻译成 ${terms[k]}`)
-  if (termLines.length) parts.push('参考下面的翻译：\n' + termLines.join('\n'))
+  const hits = matchTerms(text, settings.terms)
+  if (hits.length) parts.push('参考下面的翻译：\n' + hits.map(([s, d]) => `${s} 翻译成 ${d}`).join('\n'))
   parts.push(`将以下文本翻译为${tgt}，注意只需要输出翻译后的结果，不要额外解释：`)
   parts.push('', text)
   return parts.join('\n')

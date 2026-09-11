@@ -226,7 +226,7 @@
                 :title="packCount(pk) + ' 条术语'" @click="togglePack(pk)"
               >{{ pk.name }}</button>
             </div>
-            <p class="tp-note">术语对全部语向生效；翻日常内容时建议取消，避免专业词被强行套用。</p>
+            <p class="tp-note">术语只对文本里实际出现的词生效（词表再大也不影响速度）；对全部语向生效，翻日常内容时建议取消，避免专业词被套用。</p>
             <textarea class="terms" v-model="termsText" rows="4" placeholder="AI=人工智能&#10;CPU=处理器" @change="saveTerms"></textarea>
             <div class="set-row model-path">
               <span class="path"><span class="mi-label">{{ activeModelLabel }}</span><br>{{ modelFile }}</span>
@@ -358,10 +358,15 @@ const progressText = ref('')
 const models = ref([])
 const pickId = ref(cfg.modelId || '1.8b-q4')
 const modelLinks = ref(null)
-const configBack = ref(false) // 设置页「更换模型」进来时显示返回按钮，可不切换原样退出
-const prevModelId = ref('') // 进入模型配置前的规格，返回时恢复
-// 有已装规格可回才显示返回：首次使用（没装任何模型）时不该有返回
-const canBack = computed(() => configBack.value && !!prevModelId.value && p.modelExists(modelDir.value, prevModelId.value))
+const configBack = ref(false) // 从设置页「更换模型」进来：返回时回设置页（否则回主界面）
+const prevModelId = ref('') // 进入模型配置前的规格，返回时优先恢复
+// 可回退目标：优先上次用的规格，其次列表里任一已装规格；一个都没有（真·首次使用）时不给返回按钮
+const fallbackModelId = computed(() => {
+  if (prevModelId.value && p.modelExists(modelDir.value, prevModelId.value)) return prevModelId.value
+  const inst = models.value.find((m) => m.installed)
+  return inst ? inst.id : ''
+})
+const canBack = computed(() => !!fallbackModelId.value)
 const importing = ref(false)
 const copyHint = ref('')
 const showModelLinks = ref(false) // 手动链接默认折叠：展开时会把配置卡撑出滚动条
@@ -660,15 +665,25 @@ function changeModel() {
   refreshModels()
 }
 function backToMain() {
-  // 恢复原规格：startDownload 会把 cfg.modelId 改成"正在下载"的规格，
-  // 若直接按 cfg.modelId 判断会把「未安装」当结果 → modelReady 仍为 false → 返回等于没点
-  if (prevModelId.value) cfg.modelId = prevModelId.value
-  pickId.value = cfg.modelId || '1.8b-q4'
-  p.saveConfig(cfg)
-  modelReady.value = p.modelExists(modelDir.value, cfg.modelId)
+  // 返回 = 放弃本次更换（含未完成的下载意图），恢复上次可用规格。
+  // 必须存在一个能用的规格才有返回的意义：优先进页前记下的那个，其次列表里任一已装规格
+  // （场景：下载了新规格但没导入就退出插件，重进时 cfg.modelId 指向未安装档，
+  //  此时若不给返回，用户只能手动选回旧档再点「启用所选模型」才能离开——不合逻辑）
+  const id = fallbackModelId.value
+  if (!id) return
+  cfg.modelId = id
+  pickId.value = id
   modelLinks.value = null
   progressText.value = ''
-  view.value = 'settings' // 从设置页进入的，返回后仍回设置页
+  p.saveConfig(cfg)
+  modelFile.value = p.getModelFile(modelDir.value, id)
+  modelReady.value = true
+  const dest = configBack.value ? 'settings' : 'main'
+  configBack.value = false
+  prevModelId.value = ''
+  view.value = dest
+  if (dest === 'main') loadHistory()
+  preloadModel() // 恢复后确保服务按该规格就绪（已在跑则毫秒级返回）
 }
 function copyModelLink(u) {
   utools.copyText(u)
