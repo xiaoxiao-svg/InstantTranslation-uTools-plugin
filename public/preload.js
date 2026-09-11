@@ -468,35 +468,39 @@ try { utools.onPluginOut(() => { /* 服务自睡眠，见 SLEEP_IDLE_SECONDS */ 
 // Hy-MT2 官方 prompt 模板（HF 模型卡 README）：
 //   默认：将以下文本翻译为 {目标语言中文全称}，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}
 //   术语：指令之前 "参考下面的翻译：\n{source} 翻译成 {target}\n..."
-//   风格：指令行与风格行各占一行（"请将以下文本翻译为{x}。\n注意翻译的风格要严格符合【…】"）
-//   注意风格句不可拼进指令同一行：单字/短句输入时 1.8B 会把风格句当正文一起翻译
-function buildPrompt(text, settings = {}) {
-  const tgt = LANGS[settings.tgtLang] || '中文'
+//   风格：官方模板是"指令行+风格行各占一行"，但风格行必须改走 system 消息（见 buildStyleMessage）
+function buildStyleMessage(settings = {}) {
   const styleMap = {
     '日常': '日常口语，自然通顺',
     '正式': '正式书面语',
     '简洁': '简洁精炼，去掉冗余表达',
   }
+  const style = settings.style && styleMap[settings.style]
+  return style ? `注意翻译的风格要严格符合【${style}】` : ''
+}
+
+function buildPrompt(text, settings = {}) {
+  const tgt = LANGS[settings.tgtLang] || '中文'
   const parts = []
   const terms = settings.terms || {}
   const termLines = Object.keys(terms).map(k => `${k} 翻译成 ${terms[k]}`)
   if (termLines.length) parts.push('参考下面的翻译：\n' + termLines.join('\n'))
-  const style = settings.style && styleMap[settings.style]
-  // 退化输入保护：超短文本(≤4字符)不加风格行。实测 "翻译"→英语 在风格行存在时
-  // 5/5 把风格句当正文翻译成英文；风格对单字/双词输出本就无意义，直接走默认模板
-  if (style && (text || '').trim().length > 4) {
-    parts.push(`请将以下文本翻译为${tgt}。\n注意翻译的风格要严格符合【${style}】`)
-  } else {
-    parts.push(`将以下文本翻译为${tgt}，注意只需要输出翻译后的结果，不要额外解释：`)
-  }
+  parts.push(`将以下文本翻译为${tgt}，注意只需要输出翻译后的结果，不要额外解释：`)
   parts.push('', text)
   return parts.join('\n')
 }
 
 function chatTranslate(text, settings) {
-  const prompt = buildPrompt(text, settings)
+  const messages = []
+  const styleMsg = buildStyleMessage(settings)
+  // 风格句绝不能写进 user 正文：与待翻译文本同处一条消息时，1.8B 在
+  // 翻译词/短句输入上会把风格句当正文翻出来（真机实测 279 组泄漏 150：
+  // "翻译这段文字"→英语、"Translate this"→中文等；v0.3.7 的 ≤4 字符保底挡不住）。
+  // 改放 system 后同套用例 0/279，且风格仍生效（正式/简洁输出可区分）。
+  if (styleMsg) messages.push({ role: 'system', content: styleMsg })
+  messages.push({ role: 'user', content: buildPrompt(text, settings) })
   return requestJson(serverPort, 'POST', '/v1/chat/completions', {
-    messages: [{ role: 'user', content: prompt }],
+    messages,
     max_tokens: MAX_TOKENS,
     temperature: 0.7, // 官方推荐生成参数（1.8B）
     top_p: 0.6,
