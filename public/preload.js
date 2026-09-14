@@ -184,9 +184,11 @@ function chooseEngineFile() {
     const r = utools.showOpenDialog({
       title: '选择下载好的引擎安装包（.zip 或 .tar.gz）',
       properties: ['openFile'],
+      // 单组并集：macOS 按 UTType 严格匹配且对多段扩展名（.tar.gz）有已知缺陷
+      // （electron#23316），拆组会导致 mac 默认组选不到 tar.gz；「全部文件」兜底
       filters: [
-        { name: '引擎安装包', extensions: ['zip', 'tgz'] },
-        { name: '压缩包', extensions: ['gz'] },
+        { name: '引擎安装包 (zip / tar.gz / tgz)', extensions: ['zip', 'gz', 'tgz'] },
+        { name: '全部文件', extensions: ['*'] },
       ],
     })
     resolve(r && r.length ? r[0] : null)
