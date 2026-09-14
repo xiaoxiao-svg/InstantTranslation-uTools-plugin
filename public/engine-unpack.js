@@ -60,6 +60,7 @@ function unpackTarGz(buf, dest) {
   const data = zlib.gunzipSync(buf)
   let off = 0
   let count = 0
+  const deferLinks = [] // { safe, type, link }
   while (off + 512 <= data.length) {
     const h = data.subarray(off, off + 512)
     const nameRaw = h.subarray(0, 100)
@@ -76,7 +77,7 @@ function unpackTarGz(buf, dest) {
     if (pre) name = pre + '/' + name
     const size = parseInt(sizeStr, 8) || 0
     const body = data.subarray(off + 512, off + 512 + size)
-    // 只安装普通文件与硬链接；目录/符号链接跳过（官方包无链接）
+    // 普通文件 / 硬链接 / 符号链接都要落地，目录条目跳过
     if (type === '0' || type === '\0' || type === '7') {
       const safe = normalizePath(name, dest)
       if (safe) {
@@ -84,8 +85,45 @@ function unpackTarGz(buf, dest) {
         require('fs').writeFileSync(safe, body)
         count++
       }
+    } else if (type === '1' || type === '2') {
+      // mac 官方包的 dylib 版本化用链接（libllama-common.0.dylib → …0.3.0.dylib），
+      // 漏解 llama-server 起不来（dyld: no such file）。链接可能先于实体出现、
+      // 且存在链式链接（libllama.dylib → libllama.0.dylib → …），故先收集、结尾统一补
+      const link = h.subarray(157, 257).toString('utf8').replace(/\0.*$/, '').trim()
+      const safe = normalizePath(name, dest)
+      if (safe && link && !link.includes('..') && !path.isAbsolute(link)) {
+        deferLinks.push({ safe, type, link })
+      }
     }
     off += 512 + Math.ceil(size / 512) * 512
+  }
+  // 统一补链：链接先于实体、或链式链接（a→b→实体）时一轮不够，循环至收敛
+  const fs = require('fs')
+  let pending = deferLinks
+  while (pending.length) {
+    const remain = []
+    for (const L of pending) {
+      fs.mkdirSync(path.dirname(L.safe), { recursive: true })
+      try { fs.unlinkSync(L.safe) } catch {}
+      let ok = false
+      if (L.type === '2') {
+        try {
+          fs.symlinkSync(L.link, L.safe, 'file')
+          ok = true
+        } catch {
+          // 无符号链接特权（Windows 未开开发者模式）时退化为拷贝实体；mac 主路径不受影响
+          const src = path.join(path.dirname(L.safe), L.link)
+          if (fs.existsSync(src)) { fs.copyFileSync(src, L.safe); ok = true }
+        }
+      } else {
+        const tSafe = normalizePath(L.link, dest) // 硬链接目标按同一 stripTop 规则解析
+        if (tSafe && fs.existsSync(tSafe)) { fs.linkSync(tSafe, L.safe); ok = true }
+      }
+      if (ok) count++
+      else remain.push(L)
+    }
+    if (remain.length === pending.length) break // 一轮无进展，放弃剩余（官方包不应发生）
+    pending = remain
   }
   if (count === 0) throw new Error('tar.gz 内没有可安装的文件')
 }
