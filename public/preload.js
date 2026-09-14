@@ -573,6 +573,476 @@ function chatTranslate(text, settings) {
   })
 }
 
+// ---- TTS 本地语音朗读（sherpa-onnx WASM + 语音包按需安装）----
+// 运行时（sherpa-onnx ~16MB WASM）随插件分发；语音包按需下载安装。
+// espeak-ng-data 各语音包内容完全相同 → 只存一份共享（省 17MB/包）
+// 用 fp32 而非 int8：WASM 无 int8 优化内核，实测 int8 反而慢 36%（1.94s vs 1.43s）
+//
+// 音色选型（实测，同一段中文；速度是 WASM 单线程下的真实值）：
+//   piper 华燕        2.16x 实时 / 首块 1266ms —— 韵律平，用户反馈"机械、没顿挫感"
+//   Matcha zh-en      2.85x 实时 / 首块  509ms —— 中英混排正常，故选它作中文默认
+//   Matcha zh-baker   1.96x 实时              —— 会把英文词整个丢掉（Ignore OOV 'API'/'PDF'…），
+//                                               翻译结果常夹英文术语，直接排除
+//   MeloTTS           0.20x 实时              —— 比播放慢 5 倍，边生成边播必然卡，弃
+//   Kokoro         0.10~0.22x 实时            —— 同上弃；且 JS 绑定写死 dictDir='' 导致中文 g2p 坏（Unknown token ❓）
+// matcha 架构需要额外两个共享文件：声码器（51MB）与 espeak 音素数据（7MB，读英文词用）
+const TTS_REL_BASE = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
+const TTS_MIRROR_BASE = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
+const VOCODER_BASE = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
+const VOCODER_MIRROR = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
+const VOICES = [
+  { id: 'en-amy', lang: 'en', kind: 'vits', label: '英语 · Amy 女声', size: '64MB',
+    file: 'vits-piper-en_US-amy-medium.tar.bz2', dir: 'vits-piper-en_US-amy-medium', model: 'en_US-amy-medium.onnx' },
+  { id: 'en-ryan', lang: 'en', kind: 'vits', label: '英语 · Ryan 男声', size: '64MB',
+    file: 'vits-piper-en_US-ryan-medium.tar.bz2', dir: 'vits-piper-en_US-ryan-medium', model: 'en_US-ryan-medium.onnx' },
+  { id: 'zh-matcha', lang: 'zh', kind: 'matcha', label: '中文 · 女声 自然', size: '127MB',
+    file: 'matcha-icefall-zh-en.tar.bz2', dir: 'matcha-icefall-zh-en', model: 'model-steps-3.onnx',
+    lexicon: 'lexicon.txt', ruleFsts: ['phone-zh.fst', 'date-zh.fst', 'number-zh.fst'],
+    // size 是总下载量：语音包 75MB（浏览器下载后导入）+ 声码器 51MB（装完自动下）
+    // 包内自带 espeak-ng-data，中英混排的英文词能直接读
+    vocoder: { file: 'vocos-16khz-univ.onnx', size: '51MB' } },
+  { id: 'zh-huayan', lang: 'zh', kind: 'vits', label: '中文 · 华燕 女声', size: '64MB',
+    file: 'vits-piper-zh_CN-huayan-medium.tar.bz2', dir: 'vits-piper-zh_CN-huayan-medium', model: 'zh_CN-huayan-medium.onnx' },
+]
+function voicesRoot() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'voices') }
+function espeakShared() { return path.join(voicesRoot(), '_espeak') }
+function voiceDirOf(id) { return path.join(voicesRoot(), id) }
+function voiceById(id) { return VOICES.find(v => v.id === id) }
+function vocoderPath(v) { return path.join(voicesRoot(), '_vocoder', path.basename(v.vocoder.file)) }
+// 装了模型还不够：matcha 架构必须连声码器一起就位；需要读英文词的还要 espeak 数据
+function voiceInstalled(v) {
+  try {
+    if (!fs.existsSync(path.join(voiceDirOf(v.id), v.model))) return false
+    if (v.vocoder && !fs.existsSync(vocoderPath(v))) return false
+    return true
+  } catch { return false }
+}
+// 引擎配置：vits 与 matcha 字段不同，统一在这里拼，子进程只认 spec
+function voiceSpec(v) {
+  const d = voiceDirOf(v.id)
+  const espeak = espeakShared()
+  const dataDir = fs.existsSync(espeak) ? espeak : ''
+  if (v.kind === 'matcha') {
+    return {
+      kind: 'matcha',
+      acousticModel: path.join(d, v.model),
+      vocoder: vocoderPath(v),
+      lexicon: path.join(d, v.lexicon || 'lexicon.txt'),
+      tokens: path.join(d, 'tokens.txt'),
+      dataDir,
+      ruleFsts: (v.ruleFsts || []).map(f => path.join(d, f)).join(','),
+    }
+  }
+  return { kind: 'vits', model: path.join(d, v.model), tokens: path.join(d, 'tokens.txt'), dataDir }
+}
+function voicePackInfo() {
+  return { voices: VOICES.map(v => ({ ...v, installed: voiceInstalled(v) })), espeakReady: fs.existsSync(espeakShared()) }
+}
+function removeVoicePack(id) {
+  fs.rmSync(voiceDirOf(id), { recursive: true, force: true })
+  // 最后一个语音包也删了就清共享 espeak 与声码器
+  if (!VOICES.some(voiceInstalled)) {
+    fs.rmSync(espeakShared(), { recursive: true, force: true })
+    fs.rmSync(path.join(voicesRoot(), '_vocoder'), { recursive: true, force: true })
+  }
+}
+
+// ---- 语音合成子进程 ----
+// 渲染进程不能跑这些 WASM：Chromium 主线程禁止同步编译 >4KB 的 WASM
+// （"WebAssembly.Compile is disallowed on the main thread..."），而 sherpa 的
+// nodejs 构建依赖同步实例化。改用 ELECTRON_RUN_AS_NODE 起一个纯 Node 子进程跑
+// tts/tts-server.js（解压安装与合成都在一起），渲染层只发 HTTP 请求。
+const TTS_PORT = 18156
+let ttsProc = null
+let ttsStarting = null
+let ttsStderr = ''
+let ttsStreamReq = null   // 当前进行中的流式朗读请求（新朗读/停止时掐掉）
+function ttsScriptPath() { return path.join(__dirname, 'tts', 'tts-server.js') }
+function writeTtsError(msg) {
+  try {
+    const dir = path.join(utools.getPath('userData'), 'utools-hy-mt2')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'last-tts-error.txt'),
+      new Date().toLocaleString() + '\n' + msg + '\n', 'utf8')
+  } catch {}
+}
+function ttsErrorLogPath() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'last-tts-error.txt') }
+// 读/清错误日志：界面展示与一键复制，便于用户回报问题
+function readTtsErrorLog() {
+  try { const p = ttsErrorLogPath(); return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '' } catch { return '' }
+}
+function clearTtsErrorLog() {
+  try { fs.rmSync(ttsErrorLogPath(), { force: true }) } catch {}
+}
+function ttsAlive(proc) { return !!proc && proc.exitCode === null && !proc.killed }
+
+function startTtsServer() {
+  const script = ttsScriptPath()
+  if (!fs.existsSync(script)) return Promise.reject(new Error('语音服务脚本缺失: ' + script))
+  ttsStderr = ''
+  try {
+    ttsProc = spawn(process.execPath, [script, String(TTS_PORT), voicesRoot(), espeakShared(), ttsRuntimeDir()], {
+      env: Object.assign({}, process.env || {}, { ELECTRON_RUN_AS_NODE: '1' }),
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    })
+  } catch (e) {
+    return Promise.reject(new Error('语音服务启动失败: ' + e.message))
+  }
+  ttsProc.stderr.on('data', (d) => { ttsStderr = (ttsStderr + d.toString()).slice(-4000) })
+  ttsProc.on('error', (e) => { ttsStderr = (ttsStderr + '\n启动异常: ' + e.message).slice(-4000) })
+  // 轮询就绪（首次加载 WASM 约 1~3 秒，给足 20 秒）
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 20000
+    const poll = setInterval(async () => {
+      if (!ttsAlive(ttsProc)) {
+        clearInterval(poll)
+        return reject(new Error('语音服务启动失败（进程退出）' + (ttsStderr ? ': ' + ttsStderr.slice(-300) : '')))
+      }
+      try {
+        const h = await requestJson(TTS_PORT, 'GET', '/health', null, 1500)
+        if (h.statusCode === 200 && h.json && h.json.status === 'ok') {
+          clearInterval(poll)
+          return resolve(true)
+        }
+      } catch {}
+      if (Date.now() > deadline) {
+        clearInterval(poll)
+        reject(new Error('语音服务启动超时' + (ttsStderr ? ': ' + ttsStderr.slice(-300) : '')))
+      }
+    }, 400)
+  })
+}
+function ensureTtsServer() {
+  if (ttsAlive(ttsProc)) return Promise.resolve(true)
+  if (!ttsStarting) {
+    ttsStarting = startTtsServer().finally(() => { ttsStarting = null })
+  }
+  return ttsStarting
+}
+// 与子进程通信（失败时把子进程 stderr 一并落盘，便于用户复制报错）
+async function ttsCall(apiPath, body, timeoutMs) {
+  await ensureTtsServer()
+  let r
+  try {
+    r = await requestJson(TTS_PORT, 'POST', apiPath, body, timeoutMs || 60000)
+  } catch (e) {
+    const msg = '语音服务请求失败: ' + e.message + (ttsStderr ? '\n--- 服务日志 ---\n' + ttsStderr : '')
+    writeTtsError(msg)
+    throw new Error('语音服务请求失败: ' + e.message)
+  }
+  if (!r.json || r.json.ok !== true) {
+    const err = (r.json && r.json.error) || ('HTTP ' + r.statusCode + ' ' + String(r.raw || '').slice(0, 200))
+    writeTtsError('合成/安装失败: ' + err + (ttsStderr ? '\n--- 服务日志 ---\n' + ttsStderr : ''))
+    throw new Error(err)
+  }
+  return r.json
+}
+// 应用内下载（带进度）：声码器这种 51MB 的附属文件，让用户"跳浏览器再手动导入"
+// 太折腾，这里直接下。进度按 NDJSON 回传，界面照常显示 MB 数。
+async function fetchVoiceAsset(urls, dest, onProgress) {
+  await ensureTtsServer()
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ urls, dest })
+    const req = http.request({
+      host: '127.0.0.1', port: TTS_PORT, path: '/fetch', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    })
+    let buf = '', err = null
+    req.on('response', (res) => {
+      res.setEncoding('utf8')
+      res.on('data', (d) => {
+        buf += d
+        let i
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i)
+          buf = buf.slice(i + 1)
+          if (!line.trim()) continue
+          let msg
+          try { msg = JSON.parse(line) } catch { continue }
+          if (msg.t === 'p') { if (onProgress) onProgress(msg.got, msg.total) }
+          else if (msg.t === 'x') err = msg.error
+        }
+      })
+      res.on('end', () => { err ? reject(new Error(err)) : resolve(true) })
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+// ---- 语音合成运行时（外置）----
+// sherpa-onnx(4.3MB) + wasm-bz2(0.3MB) + tslib(0.01MB) 的 WASM/JS 不随插件分发（否则插件包
+// 从百 KB 涨到 17MB），首次用到 TTS 时从 npm 镜像拉官方 tarball（npmmirror 国内直连，
+// npmjs 兜底），解压到用户数据目录 tts-runtime/。版本锁定在常量里，升级 = 改常量（自动重下）。
+// tslib 是 wasm-bz2 的运行依赖：它 require('tslib') 时从 wasm-bz2/dist 向上找 node_modules，
+// 所以必须落在 tts-runtime/node_modules/tslib 这个相对位置，解压到别处找不到。
+const SHERPA_VERSION = '1.13.8'
+const WASM_BZ2_VERSION = '0.3.0'
+const TSLIB_VERSION = '2.8.1'
+const TTS_RUNTIME_VERSION = 'sherpa-onnx@' + SHERPA_VERSION + ' wasm-bz2@' + WASM_BZ2_VERSION + ' tslib@' + TSLIB_VERSION
+const NPM_MIRROR = 'https://registry.npmmirror.com'
+const NPM_OFFICIAL = 'https://registry.npmjs.org'
+function ttsRuntimeDir() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'tts-runtime') }
+// 就绪判定：版本标记一致 + 关键文件都在（.wasm 是本体，缺了就是半截安装）
+function ttsRuntimeReady() {
+  try {
+    const root = ttsRuntimeDir()
+    return fs.readFileSync(path.join(root, 'version.txt'), 'utf8').trim() === TTS_RUNTIME_VERSION &&
+      fs.existsSync(path.join(root, 'sherpa-onnx', 'index.js')) &&
+      fs.existsSync(path.join(root, 'sherpa-onnx', 'sherpa-onnx-wasm-nodejs.wasm')) &&
+      fs.existsSync(path.join(root, 'wasm-bz2', 'wasm', 'module.wasm')) &&
+      fs.existsSync(path.join(root, 'node_modules', 'tslib', 'tslib.js'))
+  } catch { return false }
+}
+let ttsRuntimeEnsuring = null
+function ensureTtsRuntime(onPhase) {
+  if (ttsRuntimeReady()) return Promise.resolve(true)
+  // 并发保护：一键安装与后台预热可能同时触发，只下载一次
+  if (!ttsRuntimeEnsuring) {
+    ttsRuntimeEnsuring = downloadTtsRuntime(onPhase).finally(() => { ttsRuntimeEnsuring = null })
+  }
+  return ttsRuntimeEnsuring
+}
+async function downloadTtsRuntime(onPhase) {
+  const root = ttsRuntimeDir()
+  fs.rmSync(root, { recursive: true, force: true })
+  const pkgs = [
+    { name: 'sherpa-onnx', file: 'sherpa-onnx-' + SHERPA_VERSION + '.tgz', dest: 'sherpa-onnx' },
+    { name: '@foxglove/wasm-bz2', file: 'wasm-bz2-' + WASM_BZ2_VERSION + '.tgz', dest: 'wasm-bz2' },
+    { name: 'tslib', file: 'tslib-' + TSLIB_VERSION + '.tgz', dest: path.join('node_modules', 'tslib') },
+  ]
+  try {
+    for (const p of pkgs) {
+      const tgz = path.join(root, p.file)
+      const urls = [NPM_MIRROR + '/' + p.name + '/-/' + p.file, NPM_OFFICIAL + '/' + p.name + '/-/' + p.file]
+      await fetchVoiceAsset(urls, tgz, (got, total) => {
+        if (onPhase) onPhase(`下载运行时 ${p.name} ${(got / 1048576).toFixed(1)}MB` + (total ? ' / ' + (total / 1048576).toFixed(1) + 'MB' : '') + '...')
+      })
+      if (onPhase) onPhase('解压运行时 ' + p.name + '...')
+      await ttsCall('/extract', { archive: tgz, destDir: path.join(root, p.dest) }, 120000)
+      fs.rmSync(tgz, { force: true })
+    }
+  } finally {
+    for (const p of pkgs) { try { fs.rmSync(path.join(root, p.file), { force: true }) } catch {} }
+  }
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(path.join(root, 'version.txt'), TTS_RUNTIME_VERSION)
+  if (!ttsRuntimeReady()) throw new Error('语音运行时安装后校验失败')
+  return true
+}
+
+async function installVoicePack(archivePath, onPhase) {
+  await ensureTtsRuntime(onPhase) // 解压语音包用的 wasm-bz2 就在运行时里
+  if (!fs.existsSync(archivePath)) {
+    const msg = '语音包文件不存在: ' + archivePath
+    writeTtsError(msg)
+    throw new Error(msg)
+  }
+  onPhase && onPhase('解压语音包中（约 10~30 秒）...')
+  // 语音包身份由归档顶层目录名决定，逐个匹配注册表
+  let voice = null
+  for (const v of VOICES) {
+    if (path.basename(archivePath).includes(v.dir.replace('vits-piper-', ''))) { voice = v; break }
+  }
+  // 文件名不可靠（用户可能重命名）→ 交给子进程按顶层目录判定，这里只传全部候选
+  const r = await ttsCall('/install', {
+    archive: archivePath,
+    targetDir: voice ? voiceDirOf(voice.id) : path.join(voicesRoot(), '_incoming'),
+    espeakDir: espeakShared(),
+    expectTop: voice ? voice.dir : '',
+  }, 180000)
+  let id = voice ? voice.id : ''
+  if (!id) {
+    // 文件名没匹配上：用子进程返回的顶层目录反查
+    const v = VOICES.find(x => x.dir === r.topDir)
+    if (!v) { fs.rmSync(path.join(voicesRoot(), '_incoming'), { recursive: true, force: true }); throw new Error('不是支持的语音包（顶层目录 ' + r.topDir + '）') }
+    id = v.id
+    fs.rmSync(voiceDirOf(id), { recursive: true, force: true })
+    fs.renameSync(path.join(voicesRoot(), '_incoming'), voiceDirOf(id))
+  }
+  const vv = voiceById(id)
+  if (!vv) throw new Error('安装后未找到模型文件')
+  await ensureVocoder(vv, onPhase)
+  if (!voiceInstalled(vv)) throw new Error('安装后未找到模型文件')
+  return { id, files: r.files }
+}
+// matcha 架构的附属文件（各包共用一份，装在 voices/_vocoder）
+async function ensureVocoder(vv, onPhase) {
+  if (!vv.vocoder || fs.existsSync(vocoderPath(vv))) return
+  const vd = vv.vocoder
+  onPhase && onPhase('下载声码器（' + (vd.size || '') + '）...')
+  await fetchVoiceAsset([VOCODER_BASE + '/' + vd.file, VOCODER_MIRROR + '/' + vd.file], vocoderPath(vv), (got, total) => {
+    if (onPhase) onPhase(`下载声码器 ${(got / 1048576).toFixed(1)}MB` + (total ? ' / ' + (total / 1048576).toFixed(1) + 'MB' : '') + '...')
+  })
+}
+
+/**
+ * 应用内下载并安装单个语音包（不跳浏览器、不需要用户找文件再导入）。
+ * 下载 → 解压 → （matcha）补声码器 → 校验，最后删掉压缩包只留解压产物。
+ */
+async function downloadAndInstallVoice(id, onPhase) {
+  const v = voiceById(id)
+  if (!v) throw new Error('未知语音包: ' + id)
+  if (voiceInstalled(v)) return { id, skipped: true }
+  await ensureTtsRuntime(onPhase) // 解压语音包用的 wasm-bz2 就在运行时里
+  const dest = path.join(voicesRoot(), '_downloads', v.file)
+  try {
+    if (!fs.existsSync(dest)) {
+      await fetchVoiceAsset([TTS_REL_BASE + '/' + v.file, TTS_MIRROR_BASE + '/' + v.file], dest, (got, total) => {
+        if (onPhase) onPhase(`下载 ${v.file} ${(got / 1048576).toFixed(0)}MB` + (total ? ' / ' + (total / 1048576).toFixed(0) + 'MB' : '') + '...')
+      })
+    }
+    onPhase && onPhase('解压安装中（大包需要十几秒）...')
+    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: espeakShared(), expectTop: v.dir }, 180000)
+    await ensureVocoder(v, onPhase)
+    if (!voiceInstalled(v)) throw new Error('安装后未找到模型文件')
+    return { id, files: r.files }
+  } finally {
+    try { fs.rmSync(dest, { force: true }) } catch {}
+  }
+}
+
+// 一键装齐推荐组合（英语 Amy + 中文 Matcha 女声），已装的自动跳过。
+// 用户只按一次、全程应用内下载、装完由渲染层自动启用 —— 不用来回导入、不用挑包。
+const VOICE_BUNDLE = ['en-amy', 'zh-matcha']
+async function installVoiceBundle(onPhase) {
+  const installed = []
+  for (let i = 0; i < VOICE_BUNDLE.length; i++) {
+    const v = voiceById(VOICE_BUNDLE[i])
+    if (!v) continue
+    if (voiceInstalled(v)) { installed.push(v.id); continue }
+    const tag = `（${i + 1}/${VOICE_BUNDLE.length}）`
+    await downloadAndInstallVoice(v.id, (msg) => { if (onPhase) onPhase(tag + msg) })
+    installed.push(v.id)
+  }
+  return { installed }
+}
+function chooseVoicePackFile() {
+  return new Promise((resolve) => {
+    const r = utools.showOpenDialog({
+      title: '选择下载好的语音包（.tar.bz2）',
+      properties: ['openFile'],
+      filters: [{ name: '语音包', extensions: ['bz2'] }],
+    })
+    resolve(r && r.length ? r[0] : null)
+  })
+}
+async function openVoicePackDownload(id) {
+  const v = voiceById(id)
+  if (!v) throw new Error('未知语音包: ' + id)
+  await openExternal(TTS_REL_BASE + '/' + v.file)
+  return { ok: true, file: v.file, size: v.size }
+}
+
+async function ttsSynthesize(text, voiceId) {
+  const v = voiceById(voiceId)
+  if (!v) return { ok: false, reason: '未知语音包' }
+  if (!voiceInstalled(v)) return { ok: false, reason: '语音包未安装' }
+  try {
+    await ensureTtsRuntime()
+    const r = await ttsCall('/synth', { spec: voiceSpec(v), text }, 120000)
+    return { ok: true, wav: r.wav, sampleRate: r.sampleRate }
+  } catch (e) {
+    return { ok: false, reason: e.message }
+  }
+}
+
+/**
+ * 流式朗读：分段合成，逐段推回渲染层，首字几百毫秒就出声。
+ *
+ * 与 ttsSynthesize 的区别是"不等人"：整篇合成完再播，用户要对着静默等 10 秒以上；
+ * 这里第一段算完立刻就能入播放队列，后面的段在播放期间陆续到达（实测生成速度约为
+ * 播放速度的 2 倍，所以队列只会越攒越多，不会断）。
+ * 返回 { cancel() }，用户停止或发起新朗读时调用。
+ */
+function ttsSpeakStream(text, voiceId, handlers) {
+  const h = handlers || {}
+  const v = voiceById(voiceId)
+  let finished = false
+  let cancelled = false
+  let sr = 22050
+  const fire = (name, arg) => {
+    if (finished) return
+    if (name === 'onDone' || name === 'onError') finished = true
+    try { h[name] && h[name](arg) } catch (e) { writeTtsError('朗读回调异常: ' + e.message) }
+  }
+  const fail = (msg) => {
+    writeTtsError(msg + (ttsStderr ? '\n--- 服务日志 ---\n' + ttsStderr : ''))
+    fire('onError', new Error(msg))
+  }
+  const cancel = () => {
+    cancelled = true
+    if (ttsStreamReq) { try { ttsStreamReq.destroy() } catch {} ; ttsStreamReq = null }
+  }
+  if (ttsStreamReq) { try { ttsStreamReq.destroy() } catch {} ; ttsStreamReq = null }
+
+  ;(async () => {
+    try {
+      if (!v) throw new Error('未知语音包')
+      if (!voiceInstalled(v)) throw new Error('语音包未安装')
+      await ensureTtsRuntime()
+      await ensureTtsServer()
+      const body = JSON.stringify({ spec: voiceSpec(v), text })
+      const req = http.request({
+        host: '127.0.0.1', port: TTS_PORT, path: '/synth-stream', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      })
+      ttsStreamReq = req
+      let buf = ''
+      req.on('response', (res) => {
+        if (res.statusCode !== 200) {
+          let raw = ''
+          res.on('data', (d) => { raw += d })
+          res.on('end', () => fail('朗读失败 HTTP ' + res.statusCode + ': ' + raw.slice(0, 200)))
+          return
+        }
+        res.setEncoding('utf8')
+        res.on('data', (d) => {
+          buf += d
+          let i
+          while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i)
+            buf = buf.slice(i + 1)
+            if (!line.trim()) continue
+            let msg
+            try { msg = JSON.parse(line) } catch { continue }
+            if (msg.t === 's') { sr = msg.sr || sr; fire('onStart', msg) }
+            else if (msg.t === 'c') fire('onChunk', { pcm: msg.pcm, sr })
+            else if (msg.t === 'e') fire('onDone', msg)
+            else if (msg.t === 'x') fail('朗读失败: ' + msg.error)
+          }
+        })
+        res.on('end', () => { if (!finished && !cancelled) fail('朗读流意外中断') })
+      })
+      req.on('error', (e) => {
+        if (ttsStreamReq === req) ttsStreamReq = null
+        if (!cancelled) fail('朗读请求失败: ' + e.message)
+      })
+      req.end(body)
+    } catch (e) {
+      if (!cancelled) fail('朗读失败: ' + e.message)
+    }
+  })()
+
+  return { cancel }
+}
+// 预热：起服务并把已启用语音包的引擎先建好（首次约 3~7 秒）
+function ttsWarmup(voiceIds) {
+  const ids = Array.isArray(voiceIds) && voiceIds.length ? voiceIds : VOICES.filter(voiceInstalled).map(v => v.id)
+  const list = ids.map(voiceById).filter(v => v && voiceInstalled(v))
+  if (!list.length) return { ok: true, warmed: [] }
+  ;(async () => {
+    try {
+      await ensureTtsRuntime()
+      await ensureTtsServer()
+      for (const v of list) {
+        await ttsCall('/warmup', { spec: voiceSpec(v) }, 120000)
+      }
+    } catch (e) { writeTtsError('预热失败: ' + e.message) }
+  })()
+  return { ok: true, warming: list.map(v => v.id) }
+}
 // ---- 对外 API（挂到 window.preload，渲染层调用）----
 window.preload = {
   getConfig: readCfg,
@@ -672,4 +1142,18 @@ window.preload = {
     }
   },
   stopServer,
+  // TTS 本地语音朗读：语音包列表/安装/卸载/合成/下载链接
+  voicePackInfo,
+  chooseVoicePackFile,
+  installVoicePack,
+  downloadAndInstallVoice,
+  installVoiceBundle,
+  removeVoicePack,
+  openVoicePackDownload,
+  ttsSynthesize,
+  ttsSpeakStream,
+  ttsWarmup,
+  readTtsErrorLog,
+  clearTtsErrorLog,
+  ttsErrorLogPath,
 }

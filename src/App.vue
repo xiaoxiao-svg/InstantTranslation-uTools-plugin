@@ -214,33 +214,74 @@
                 <button v-for="s in ['日常','正式','简洁']" :key="s" :class="{on: cfg.style===s}" @click="setStyle(s)">{{ s }}</button>
               </div>
             </div>
-            <div class="set-row">
+            <!-- 术语表：标题行与行业包按钮合并成一行，节省垂直空间（设置页要一屏放下不出滚动条） -->
+            <div class="term-head">
               <span class="set-label">术语表</span>
-              <span class="muted">每行一条，格式: 术语=译文（对全部语向生效）</span>
-            </div>
-            <div class="term-packs">
-              <span class="tp-hint">一键添加行业术语包：</span>
+              <span class="muted">每行一条 术语=译文</span>
+              <span class="spacer"></span>
               <button
                 v-for="pk in TERM_PACKS" :key="pk.id"
                 class="btn ghost sm" :class="{ on: packActive(pk.id) }"
-                :title="packCount(pk) + ' 条术语'" @click="togglePack(pk)"
+                :title="pk.name + '：' + packCount(pk) + ' 条术语，点一下' + (packActive(pk.id) ? '取消' : '添加')"
+                @click="togglePack(pk)"
               >{{ pk.name }}</button>
             </div>
-            <p class="tp-note">术语只对文本里实际出现的词生效（词表再大也不影响速度）；对全部语向生效，翻日常内容时建议取消，避免专业词被套用。</p>
-            <textarea class="terms" v-model="termsText" rows="4" placeholder="AI=人工智能&#10;CPU=处理器" @change="saveTerms"></textarea>
+            <textarea class="terms" v-model="termsText" rows="3" placeholder="AI=人工智能&#10;CPU=处理器" @change="saveTerms"></textarea>
             <div class="set-row model-path">
               <span class="path"><span class="mi-label">{{ activeModelLabel }}</span><br>{{ modelFile }}</span>
               <button class="btn ghost sm" @click="changeModel">更换模型</button>
             </div>
+
+            <!-- 语音包（本地 TTS 朗读）：装了对应语言的语音包，朗读就用它；否则用系统 TTS -->
+            <div class="set-row voice-head">
+              <span class="set-label">朗读语音</span>
+              <span class="muted">一键装齐英语+中文（约190MB）；边合成边播，首字约 1 秒出声</span>
+              <span class="spacer"></span>
+              <button class="btn ghost sm" :disabled="!!voiceBusy || voiceAllInstalled" @click="installAllVoices">{{ voiceAllInstalled ? '已全部就绪' : '一键安装' }}</button>
+              <button class="btn ghost sm" :disabled="!!voiceBusy" @click="importVoice">导入语音包</button>
+            </div>
+            <div v-for="lang in ['en','zh']" :key="lang" class="set-row voice-row">
+              <span class="voice-lang">{{ voiceLangLabel(lang) }}</span>
+              <div class="seg">
+                <button :class="{on: !voicePackMap[lang]}" @click="setVoiceFor(lang, '')">系统</button>
+                <button
+                  v-for="v in voiceOf(lang)" :key="v.id"
+                  :disabled="!v.installed" :title="v.installed ? '' : '未安装'"
+                  :class="{on: voicePackMap[lang] === v.id}"
+                  @click="setVoiceFor(lang, v.id)"
+                >{{ v.label.split('·')[1]?.trim() || v.label }}</button>
+              </div>
+              <span class="spacer"></span>
+              <!-- 未装：一个下载按钮（取该语言第一个语音包）；已装：删除按钮 -->
+              <button v-if="!voiceOf(lang).some(v => v.installed)" class="btn ghost sm"
+                :disabled="!!voiceBusy" @click="downloadVoice(voiceOf(lang)[0].id)"
+              >下载（{{ voiceOf(lang)[0].size }}）</button>
+              <button v-else-if="voiceOf(lang).length > 1" class="btn ghost sm"
+                :disabled="!!voiceBusy"
+                @click="downloadVoice(voiceOf(lang).find(v => !v.installed)?.id || voiceOf(lang)[0].id)"
+              >换音色</button>
+              <button v-if="voiceOf(lang).some(v => v.installed)" class="btn ghost sm"
+                :disabled="!!voiceBusy" @click="removeVoice(voiceOf(lang).find(v => v.installed).id)"
+              >删除</button>
+            </div>
+            <p v-if="voiceStatus" class="voice-hint">{{ voiceStatus }}</p>
+            <div v-if="voiceError" class="err-box">
+              <p class="err-title">语音包操作失败</p>
+              <p class="err-msg">{{ voiceError }}</p>
+              <div class="err-actions">
+                <button class="btn ghost sm" @click="copyTtsLog">复制详细日志</button>
+                <span class="err-hint">把日志发我即可定位问题</span>
+              </div>
+            </div>
+
             <div v-if="modelFailed && failReason" class="err-box">
               <p class="err-title">引擎异常</p>
               <p class="err-msg">{{ failReason }}</p>
               <p class="err-hint">完整错误已写入 uTools 用户数据目录 utools-hy-mt2/last-engine-error.txt</p>
             </div>
             <div class="footnote">
-              <p>· 源语言默认自动检测：输入即识别，识别为中文时目标自动切英语，其余默认译中文。</p>
-              <p>· 首次启动引擎约 10 秒；闲置 5 分钟自动睡眠（内存降至 ~60MB），再翻译自动唤醒约 3 秒。</p>
-              <p>· 意大利语/印尼语等无独特字符的语种可能识别为英语，需要时手动固定源语言。</p>
+              <p>· 源语言默认自动检测（识别为中文时目标自动切英语）；无独特字符的语种可能识别为英语，可手动固定。</p>
+              <p>· 引擎首次启动约 10 秒；闲置 5 分钟自动睡眠（内存降至 ~60MB），再翻译自动唤醒约 3 秒。</p>
             </div>
           </template>
         </div>
@@ -391,6 +432,14 @@ const autoLabel = ref('自动检测')
 const history = ref([])
 const termsText = ref(Object.keys(cfg.terms || {}).map(k => k + '=' + cfg.terms[k]).join('\n'))
 
+// ---- 语音包（本地 TTS 朗读；按语言选用，未装则回退系统 TTS）----
+const voiceList = ref([])
+const voicePackMap = ref(Object.assign({ en: '', zh: '' }, cfg.voicePackMap || {})) // 语言 → 语音包 id
+const voiceEspeakReady = ref(false)
+const voiceBusy = ref('')        // 正在安装/卸载的语音包 id
+const voiceStatus = ref('')
+const voiceError = ref('')
+
 // ---- 历史记录（本地文件 userData/utools-hy-mt2/storage.json，经 preload 读写）----
 // ---- 历史记录（本地文件 userData/utools-hy-mt2/storage.json，经 preload 读写）----
 function loadHistory() {
@@ -440,18 +489,111 @@ function copyText(t) {
   utools.copyText(t)
   flashStatus('已复制 ✓')
 }
-function speak(text, langCode) {
-  if (!text || !window.speechSynthesis) return
-  window.speechSynthesis.cancel()
+// ---- 朗读：本地语音包流式播放（边合成边出声），未安装/失败回退系统 TTS ----
+// 语音包按语言匹配：装了英语包就朗读英语、装了中文包就朗读中文
+function localVoiceFor(langCode) {
+  if (!langCode) return null
+  const packId = voicePackMap.value[langCode]
+  if (!packId) return null
+  const v = voiceList.value.find(x => x.id === packId)
+  return v && v.installed ? v : null
+}
+
+// 播放走 Web Audio 而不是 <audio>：分段到达的音频要首尾相接不留缝，
+// <audio> 每段都得重新加载解码，段间必然有间隙；Web Audio 能把每段排在前一段的
+// 结束时刻上（采样级对齐），听感是一条连续的话，而不是一顿一顿的拼接。
+let audioCtx = null
+let speakGain = null
+let playCursor = 0        // 下一段该排到的时刻（AudioContext 时间轴）
+let activeNodes = []
+let speakSession = 0      // 每次朗读自增；异步回调靠它判断自己是否已过期
+let currentStream = null
+
+function stopSpeaking() {
+  speakSession++
+  if (currentStream) { try { currentStream.cancel() } catch (e) {} ; currentStream = null }
+  for (const n of activeNodes) { try { n.stop() } catch (e) {} }
+  activeNodes = []
+  playCursor = 0
+  window.speechSynthesis && window.speechSynthesis.cancel()
+}
+
+function ensureAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext
+    if (!AC) return null
+    audioCtx = new AC()
+    speakGain = audioCtx.createGain()
+    speakGain.connect(audioCtx.destination)
+  }
+  return audioCtx
+}
+
+// base64(16bit PCM) → Float32，按到达顺序排进播放队列
+function enqueuePcm(b64, sampleRate) {
+  const ctx = ensureAudio()
+  if (!ctx) return
+  const bin = atob(b64)
+  const n = bin.length >> 1
+  const f32 = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    let v = (bin.charCodeAt(i * 2 + 1) << 8) | bin.charCodeAt(i * 2)
+    if (v & 0x8000) v -= 0x10000        // 16bit 补码 → 有符号
+    f32[i] = v / 32768
+  }
+  const buf = ctx.createBuffer(1, n, sampleRate || 22050)
+  buf.copyToChannel(f32, 0)
+  const src = ctx.createBufferSource()
+  src.buffer = buf
+  src.connect(speakGain)
+  // 首段留 60ms 调度余量（排到 past 会被直接丢弃）；其后紧贴上一段结尾
+  const at = Math.max(ctx.currentTime + 0.06, playCursor)
+  src.start(at)
+  playCursor = at + buf.duration
+  activeNodes.push(src)
+  src.onended = () => { activeNodes = activeNodes.filter(x => x !== src) }
+}
+
+function speakSystem(text, langCode) {
+  if (!window.speechSynthesis) return
   const u = new SpeechSynthesisUtterance(text)
   u.lang = ttsOf(langCode)
   u.rate = 1
   window.speechSynthesis.speak(u)
 }
+
+async function speak(text, langCode) {
+  if (!text) return
+  stopSpeaking()
+  const session = speakSession
+  const v = localVoiceFor(langCode)
+  if (v && p.ttsSpeakStream && ensureAudio()) {
+    try { if (audioCtx.state === 'suspended') await audioCtx.resume() } catch (e) {}
+    let got = false
+    statusText.value = '合成中...'
+    currentStream = p.ttsSpeakStream(text, v.id, {
+      onChunk(m) {
+        if (session !== speakSession) return
+        if (!got) { got = true; statusText.value = '朗读中...' }
+        enqueuePcm(m.pcm, m.sr)
+      },
+      onDone() { if (session !== speakSession) return; statusText.value = READY_TEXT },
+      onError() {
+        if (session !== speakSession) return
+        currentStream = null
+        // 已经出过声就不再回退系统朗读，否则会从头再念一遍
+        if (!got) { flashStatus('本地语音不可用，已用系统朗读'); speakSystem(text, langCode) }
+        else statusText.value = READY_TEXT
+      },
+    })
+    return
+  }
+  speakSystem(text, langCode)
+}
 function clearAll() {
   input.value = ''
   result.value = ''
-  window.speechSynthesis && window.speechSynthesis.cancel()
+  stopSpeaking()
 }
 
 // ---- 翻译 ----
@@ -500,7 +642,7 @@ watch(input, (v) => {
     clearTimeout(detectTimer)
     result.value = ''
     if (srcLang.value === 'auto') autoLabel.value = '自动检测'
-    window.speechSynthesis && window.speechSynthesis.cancel()
+    stopSpeaking()
     return
   }
   if (srcLang.value !== 'auto') return
@@ -546,6 +688,102 @@ function togglePack(pk) {
 }
 watch(autoCopy, (v) => { cfg.autoCopy = v; persistCfg() })
 watch(tgtLang, (v) => { cfg.tgtLang = v; persistCfg() })
+
+// ---- 语音包管理（本地 TTS 朗读；模型按需下载，espeak 数据各包共享只存一份）----
+function refreshVoices() {
+  try {
+    const info = p.voicePackInfo ? p.voicePackInfo() : { voices: [] }
+    voiceList.value = info.voices || []
+    voiceEspeakReady.value = !!info.espeakReady
+    // 后台预热已启用的语音包（WASM 初始化 + 模型加载 ~1.5s，预热后点朗读即出音）
+    if (p.ttsWarmup) {
+      const ids = Object.values(voicePackMap.value).filter(Boolean)
+      if (ids.length) setTimeout(() => { try { p.ttsWarmup(ids) } catch {} }, 1500)
+    }
+  } catch { voiceList.value = [] }
+}
+// 选择某语言的朗读语音包；'' = 用系统 TTS
+function setVoiceFor(lang, id) {
+  voicePackMap.value = Object.assign({}, voicePackMap.value, { [lang]: id })
+  cfg.voicePackMap = Object.assign({}, voicePackMap.value)
+  persistCfg()
+  // 切换到某个语音包时立即预热，避免首次朗读等 1.5s
+  if (id && p.ttsWarmup) setTimeout(() => { try { p.ttsWarmup([id]) } catch {} }, 100)
+}
+function voiceOf(lang) { return voiceList.value.filter(v => v.lang === lang) }
+// 推荐组合（与 preload 的 VOICE_BUNDLE 一致）：一键安装按钮的"已就绪"判定
+const BUNDLE_IDS = ['en-amy', 'zh-matcha']
+const voiceAllInstalled = computed(() => BUNDLE_IDS.every(id => voiceList.value.some(v => v.id === id && v.installed)))
+// 一键装齐英语 + 中文：全程应用内下载（带进度），装完自动启用，用户一次都不用挑包
+async function installAllVoices() {
+  voiceError.value = ''
+  voiceBusy.value = 'bundle'
+  try {
+    const r = await p.installVoiceBundle((phase) => { voiceStatus.value = phase })
+    refreshVoices()
+    for (const id of r.installed) {
+      const v = voiceList.value.find(x => x.id === id)
+      if (v && !voicePackMap.value[v.lang]) setVoiceFor(v.lang, v.id) // 只补没有选过的语言，不动用户已选的
+    }
+    voiceStatus.value = '语音朗读已就绪（英语 + 中文）✓'
+  } catch (e) { voiceError.value = e.message }
+  voiceBusy.value = ''
+}
+// 单个语音包应用内下载安装（下载→解压→补声码器一条龙，不再跳浏览器让用户自己找文件）
+async function downloadVoice(id) {
+  voiceError.value = ''
+  voiceBusy.value = 'download'
+  try {
+    await p.downloadAndInstallVoice(id, (phase) => { voiceStatus.value = phase })
+    voiceStatus.value = '安装完成 ✓'
+    refreshVoices()
+    const v = voiceList.value.find(x => x.id === id)
+    if (v && !voicePackMap.value[v.lang]) setVoiceFor(v.lang, v.id)
+  } catch (e) { voiceError.value = e.message }
+  voiceBusy.value = ''
+}
+async function importVoice() {
+  voiceBusy.value = 'import'
+  voiceError.value = ''
+  const f = await p.chooseVoicePackFile()
+  if (!f) { voiceBusy.value = ''; return }
+  voiceStatus.value = '解压安装中（大包需要十几秒）...'
+  try {
+    const r = await p.installVoicePack(f, (phase) => { voiceStatus.value = phase })
+    voiceStatus.value = '安装完成 ✓'
+    refreshVoices()
+    // 首次安装后自动启用（该语言还没选过语音包时）
+    const v = voiceList.value.find(x => x.id === r.id)
+    if (v && !voicePackMap.value[v.lang]) setVoiceFor(v.lang, v.id)
+  } catch (e) { voiceError.value = e.message }
+  voiceBusy.value = ''
+}
+function removeVoice(id) {
+  try {
+    p.removeVoicePack(id)
+    // 若删的正是当前启用的，退回系统 TTS
+    const next = Object.assign({}, voicePackMap.value)
+    for (const k of Object.keys(next)) if (next[k] === id) next[k] = ''
+    voicePackMap.value = next
+    cfg.voicePackMap = Object.assign({}, next)
+    persistCfg()
+    refreshVoices()
+    voiceStatus.value = '已删除'
+  } catch (e) { voiceError.value = e.message }
+}
+const voiceLangLabel = (l) => (l === 'en' ? '英语' : l === 'zh' ? '中文' : l)
+// 复制语音服务详细日志（含子进程 stderr），便于用户回报问题
+function copyTtsLog() {
+  try {
+    const log = (p.readTtsErrorLog && p.readTtsErrorLog()) || ''
+    const pathHint = (p.ttsErrorLogPath && p.ttsErrorLogPath()) || ''
+    const text = log
+      ? log + '\n--- 日志文件路径 ---\n' + pathHint
+      : '（暂无详细日志）' + (pathHint ? '\n' + pathHint : '')
+    utools.copyText(text)
+    voiceStatus.value = '详细日志已复制到剪贴板，可直接粘贴发送'
+  } catch (e) { voiceStatus.value = '复制失败: ' + e.message }
+}
 
 // ---- 模型配置（多参数规格：同一目录可共存多个 GGUF，激活哪个由 cfg.modelId 决定）----
 const picked = computed(() => models.value.find((m) => m.id === pickId.value))
@@ -693,6 +931,7 @@ function copyModelLink(u) {
 
 // ---- 引擎安装（进入插件第一步：引擎就绪后才进入模型配置/主界面）----
 function initFlow() {
+  refreshVoices() // 语音包状态（朗读用，与引擎无关，进插件就查）
   const info = p.engineInfo()
   engineData.value = info
   engineVersion.value = info.version || ''
@@ -921,16 +1160,28 @@ body {
 }
 .seg button.on { background: var(--seg-on); color: var(--blue); font-weight: 600; box-shadow: var(--seg-on-shadow); }
 .terms {
-  width: 100%; min-height: 90px; border: 1px solid var(--line); border-radius: 8px;
-  padding: 10px 14px; font-size: 13px; line-height: 1.8; resize: none; display: block;
+  width: 100%; min-height: 68px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 14px; font-size: 13px; line-height: 1.7; resize: none; display: block;
   font-family: inherit; color: var(--ink); background: var(--card);
 }
 .terms:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--ring); }
-.model-path { border-top: 1px solid var(--line-soft); margin-top: 6px; padding-top: 12px; min-height: 0; }
+.model-path { border-top: 1px solid var(--line-soft); margin-top: 4px; padding-top: 8px; min-height: 0; }
+
+/* ---- 语音包（设置页） ---- */
+.voice-head { border-top: 1px solid var(--line-soft); margin-top: 12px; padding-top: 12px; }
+/* 说明文字单行省略号：再长也不许把右侧按钮挤换行（与链接折叠同一套约定） */
+.voice-head .muted { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.voice-row { min-height: 40px; }
+.voice-lang { font-size: 12.5px; color: var(--sub); flex: none; width: 46px; }
+.voice-size { font-size: 11.5px; color: var(--faint); }
+.voice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.seg button:disabled { color: var(--disabled); cursor: not-allowed; }
 .path { font-size: 12px; color: var(--faint); word-break: break-all; line-height: 1.6; flex: 1; margin-right: 12px; }
-.footnote { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
-.footnote p { font-size: 12px; color: var(--faint); line-height: 2; }
+.footnote { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.footnote p { font-size: 12px; color: var(--faint); line-height: 1.8; }
 .err-box { margin-top: 12px; padding: 10px 14px; background: var(--danger-bg); border: 1px solid var(--danger-line); border-radius: 8px; }
+.voice-hint { font-size: 12px; color: var(--faint); margin-top: 6px; }
+.err-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .err-title { font-size: 12.5px; font-weight: 600; color: var(--danger-title); margin-bottom: 4px; }
 .err-msg { font-size: 12px; color: var(--danger-msg); line-height: 1.7; word-break: break-all; white-space: pre-wrap; }
 .err-hint { font-size: 11.5px; color: var(--faint); margin-top: 6px; }
@@ -1007,9 +1258,12 @@ body {
 .links-note { margin-top: 10px; font-size: 12px; color: var(--faint); line-height: 1.8; }
 
 /* ---- 术语包（设置页一键添加） ---- */
+/* 标题行 + 行业包按钮同行：设置页垂直空间紧张，合并后省一行 */
+.term-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 40px; }
 .term-packs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .tp-hint { font-size: 12px; color: var(--faint); }
 .term-packs .btn.on { border-color: var(--blue); color: var(--blue); background: var(--model-on); font-weight: 600; }
+.term-head .btn.on { border-color: var(--blue); color: var(--blue); background: var(--model-on); font-weight: 600; }
 .tp-note { font-size: 11.5px; color: var(--faint); margin-bottom: 8px; line-height: 1.6; }
 .full-card { display: flex; flex-direction: column; justify-content: center; }
 .full-card.overlay-card { justify-content: flex-start; }

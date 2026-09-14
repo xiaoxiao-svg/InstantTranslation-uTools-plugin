@@ -8,6 +8,8 @@
     "build": "vite build && node scripts/strip-comments.cjs"
   },
   "dependencies": {
+    "@foxglove/wasm-bz2": "^0.3.0",
+    "sherpa-onnx": "^1.13.8",
     "vue": "^3.4.0"
   },
   "devDependencies": {
