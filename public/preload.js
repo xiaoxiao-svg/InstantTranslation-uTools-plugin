@@ -120,8 +120,17 @@ function writeEngineError(msg) {
   } catch (e) { console.error('[hy-mt2] 写入错误日志失败:', e.message) }
 }
 
-// 引擎状态快照（UI 决定是否引导安装）
-function engineInfo() {
+// 引擎包下载源：镜像可用性会漂移（实测 gh-proxy.com 直出 CDN 且支持 Range 续传、ghfast.top 时好时坏），
+// 应用内直下按此顺序自动换源，手动链接也是这一份；官方直链殿后（需代理）
+function enginePkgUrls(t) {
+  const u = ENG_BASE + '/' + t.file
+  return [
+    { label: 'gh-proxy.com 加速（国内推荐）', url: 'https://gh-proxy.com/' + u },
+    { label: 'ghfast.top 加速', url: 'https://ghfast.top/' + u },
+    { label: 'GitHub 官方直链（需代理）', url: u },
+  ]
+}
+function engineInfo() { // 引擎状态快照（UI 决定是否引导安装）
   const key = engineTarget()
   const t = key ? ENG_PACKS[key] : null
   const dir = engineInstallDir()
@@ -133,12 +142,7 @@ function engineInfo() {
     installed, marker, engineDir: dir, platform: process.platform + '/' + process.arch,
     version: ENG_VERSION,
     target: t ? { key, label: t.label, exe: t.exe, size: t.size, url: ENG_BASE + '/' + t.file } : null,
-    // 引擎手动下载链接（官方直链需代理，国内建议用加速镜像；实测 ghfast.top 快于 gh-proxy）
-    mirrors: t ? [
-      { label: 'ghfast.top 加速（国内推荐）', url: 'https://ghfast.top/' + ENG_BASE + '/' + t.file },
-      { label: 'gh-proxy.com 加速', url: 'https://gh-proxy.com/' + ENG_BASE + '/' + t.file },
-      { label: 'GitHub 官方直链（需代理）', url: ENG_BASE + '/' + t.file },
-    ] : [],
+    mirrors: t ? enginePkgUrls(t) : [],
   }
 }
 
@@ -169,15 +173,38 @@ function installEngineArchive(archive, t, onPhase) {
   })
 }
 
-// 打开系统浏览器下载当前平台引擎（国内加速镜像优先，GitHub 直链国内不通）
-async function openEngineDownload() {
+// 引擎应用内直下：下载（镜像自动换源+断点续传）→ 魔数校验 → 复用安装逻辑解压换入；包不留存
+// 与模型一致的体验（免浏览器、免二次导入），也绕开了导入对话框与手动解压的整条路径
+let engineDlAbort = null
+async function downloadEngine(onProgress, onPhase) {
   const key = engineTarget()
   const t = key ? ENG_PACKS[key] : null
   if (!t) throw new Error('当前平台不受支持: ' + process.platform + '/' + process.arch)
-  const url = 'https://ghfast.top/' + ENG_BASE + '/' + t.file
-  await openExternal(url)
-  return { url, size: t.size }
+  const pkgDir = path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine-pkg')
+  const dest = path.join(pkgDir, t.file)
+  const token = engineDlAbort = { stop: false }
+  try {
+    fs.mkdirSync(pkgDir, { recursive: true })
+    // 上次已下好的完整包（下载成功但安装中断）直接复用，不重复下载
+    const cached = fs.existsSync(dest) && fs.statSync(dest).size > 5 * 1048576
+    if (!cached) {
+      onPhase && onPhase('下载引擎中...')
+      await downloadFile(enginePkgUrls(t).map((r) => r.url), dest, {
+        minSize: 5 * 1048576,
+        magic: /\.zip$/.test(t.file) ? 'PK\u0003\u0004' : '\u001f\u008b',
+        onProgress,
+        aborted: () => token.stop,
+      })
+    }
+    onPhase && onPhase('安装引擎中...')
+    await installEngineArchive(dest, t, onPhase)
+    try { fs.rmSync(pkgDir, { recursive: true, force: true }) } catch {} // 10MB 级，无留存价值
+    return engineInfo()
+  } finally {
+    if (engineDlAbort === token) engineDlAbort = null
+  }
 }
+function cancelEngineDownload() { if (engineDlAbort) engineDlAbort.stop = true }
 
 // 用户手动下载后导入安装包
 function chooseEngineFile() {
@@ -582,7 +609,8 @@ window.preload = {
   saveConfig: writeCfg,
   // 推理引擎（外置安装）：状态/浏览器下载/导入安装包/选择文件
   engineInfo,
-  openEngineDownload,
+  downloadEngine,
+  cancelEngineDownload,
   installEngineFromFile,
   chooseEngineFile,
   entryKeywords,

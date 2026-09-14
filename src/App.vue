@@ -11,17 +11,20 @@
             <button class="btn ghost" :disabled="engineBusy" @click="importEngine">导入安装包</button>
           </div>
           <div v-if="engineBusy" class="progress">
-            <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
-            <span class="progress-text">{{ engineStatus }}</span>
+            <div class="progress-bar"><div class="fill" :style="{width: engineDlPercent + '%'}"></div></div>
+            <div class="progress-row">
+              <span class="progress-text">{{ engineDlText }}</span>
+              <button class="btn ghost sm" @click="cancelEngineDownload">取消</button>
+            </div>
           </div>
           <p v-else-if="engineStatus" class="progress-text copy-hint">{{ engineStatus }}</p>
           <div v-if="engineError" class="err-box">
             <p class="err-title">引擎安装失败</p>
             <p class="err-msg">{{ engineError }}</p>
-            <p class="err-hint">用浏览器打开下方任一链接即可下载，下载完成后点"导入安装包"选择该文件；完整错误见 uTools 用户数据目录 utools-hy-mt2/last-engine-error.txt</p>
+            <p class="err-hint">可直接重试（进度已保留、自动续传）；仍失败时展开下方链接用浏览器下载，再点「导入安装包」。完整错误见 uTools 用户数据目录 utools-hy-mt2/last-engine-error.txt</p>
           </div>
           <button class="links-toggle" @click="showEngineLinks = !showEngineLinks">
-            {{ showEngineLinks ? '▾' : '▸' }} 浏览器下载打不开？用这里的手动链接
+            {{ showEngineLinks ? '▾' : '▸' }} 应用内下载失败？用浏览器下载这些链接，完成后点「导入安装包」
           </button>
           <template v-if="showEngineLinks">
             <div class="link-row" v-for="(r, i) in engineData.mirrors" :key="i">
@@ -385,6 +388,8 @@ const engineVersion = ref('')
 const engineBusy = ref(false)
 const engineStatus = ref('')
 const engineError = ref('')
+const engineDlPercent = ref(0) // 引擎应用内下载进度
+const engineDlText = ref('')
 const input = ref('')
 const result = ref('')
 const busy = ref(false)
@@ -730,22 +735,47 @@ function initFlow() {
   })
 }
 async function installEngine() {
+  if (engineBusy.value) return
+  engineBusy.value = true
   engineError.value = ''
+  engineDlPercent.value = 0
+  engineDlText.value = '连接下载源...'
   try {
-    const r = await p.openEngineDownload()
-    engineStatus.value = '已调用系统浏览器打开下载页（' + (r.size || '') + '）。浏览器下载完成后点「导入安装包」选择该文件；官方链接打不开时，复制下方镜像链接到浏览器'
+    // 应用内直下（镜像自动换源+断点续传）→ 自动解压安装 → 完成
+    await p.downloadEngine((pr) => {
+      engineDlPercent.value = pr.total ? Math.min(99, Math.floor(pr.received / pr.total * 100)) : 0
+      const mb = (n) => (n / 1048576).toFixed(1) + 'MB'
+      engineDlText.value = mb(pr.received) + (pr.total ? ' / ' + mb(pr.total) + '（' + engineDlPercent.value + '%）' : '')
+        + (pr.speed ? ' · ' + (pr.speed / 1048576).toFixed(1) + 'MB/s' : '')
+    }, (phase) => {
+      if (phase === '安装引擎中...') engineDlPercent.value = 100
+      engineDlText.value = phase
+    })
+    engineStatus.value = ''
+    engineReady.value = true
+    initFlow()
   } catch (e) {
-    engineError.value = e.message
+    if (e.code === 'aborted') {
+      engineStatus.value = '已取消下载，进度已保留，再点「下载引擎」自动续传'
+    } else {
+      engineError.value = e.message
+    }
   }
+  engineBusy.value = false
 }
+function cancelEngineDownload() { p.cancelEngineDownload() }
 async function importEngine() {
   engineBusy.value = true
   engineError.value = ''
+  engineDlPercent.value = 0
   const f = await p.chooseEngineFile()
   if (!f) { engineBusy.value = false; return }
-  engineStatus.value = '解析安装包...'
+  engineDlText.value = '解析安装包...'
   try {
-    await p.installEngineFromFile(f, (phase) => { engineStatus.value = phase })
+    await p.installEngineFromFile(f, (phase) => {
+      engineDlPercent.value = 100
+      engineDlText.value = phase
+    })
     engineReady.value = true
     initFlow()
   } catch (e) {
