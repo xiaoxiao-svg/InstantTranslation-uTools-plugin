@@ -3,16 +3,16 @@
  * 职责：
  *  1. 模型管理：多参数规格注册表（1.8B/7B/30B-A3B 官方 GGUF 档位，MODELS 一处维护），
  *     同一目录可共存多个规格，cfg.modelId 决定当前档位（缺省回落 1.8B Q4_K_M，老配置不变）；
- *     下载走系统浏览器（hf-mirror 直链），本地文件可导入（按文件名匹配档位）
- *  2. 推理引擎安装与升级（v0.4.0 起外置：用户按平台下载 llama.cpp 官方构建，
- *     插件自动解压到 userData/utools-hy-mt2/engine——插件包因此只含前端代码，KB 级）
- *  3. 管理本地 llama-server.exe 推理服务（官方 llama.cpp 构建，Vulkan/Metal/CPU 按平台）
+ *     应用内直下（ModelScope 直连优先，断点续传，download.js），导入本地文件为兜底
+ *  2. 推理引擎安装与升级（v0.4.0 起外置：应用内直下 llama.cpp 官方构建，
+ *     自动解压到 userData/utools-hy-mt2/engine——插件包因此只含前端代码，KB 级）
+ *  3. 管理本地 llama-server 推理服务（官方 llama.cpp 构建，Vulkan/Metal/CPU 按平台）
  *  4. 翻译请求转发（/v1/chat/completions，官方 prompt 模板）
  *
  * 引擎说明（v0.4.0 重构）：
  *  - 引擎不再内置插件包：llama.cpp 官方 nightly（固定版本，见 ENG_VERSION）打包为
  *    win-vulkan / win-cpu / macos-arm64 / macos-x64 / ubuntu-x64 等平台资产，
- *    三端首次使用按平台引导下载（ubrowser 一键下载 或 手动下载后导入压缩包）。
+ *    首次使用按平台应用内直下（download.js：镜像自动换源 + 断点续传；导入安装包为兜底）。
  *  - 已安装引擎由 engine/version.txt 标记版本，与 ENG_VERSION 不符时引导重装。
  *  - 安装后流程不变：服务进程常驻，闲置 5 分钟自动睡眠（内存 2.4GB→63MB），
  *    来请求自动唤醒（唤醒+首译实测 ~3.9s）。插件退出不杀进程。
