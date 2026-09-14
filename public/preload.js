@@ -22,6 +22,7 @@ const path = require('path')
 const fs = require('fs')
 const http = require('http')
 const { unpackArchive } = require('./engine-unpack.js')
+const { downloadFile, partPath } = require('./download.js')
 
 const FIXED_PORT = 18155
 const SLEEP_IDLE_SECONDS = 300 // 闲置 5 分钟自动睡眠（权重出内存）
@@ -600,11 +601,31 @@ window.preload = {
     return { rows: modelUrls(m), file: m.file, size: m.size }
   },
   openModelDir(dir, id) { utools.showItemInFolder(modelPathIn(dir, modelById(id))) },
-  // 打开系统浏览器下载所选规格（ModelScope 国内直链；下载完成后点「导入模型文件」或重进插件自动检测）
-  async openModelDownload(id) {
+  // 应用内直下（ModelScope 国内直连 → hf-mirror → 官方站，断点续传）：完成即落正式文件名，无需再导入
+  // 单例：同一时间一个模型在下载；cancelModelDownload() 置停止标志，.part 保留供下次续传
+  modelDlAbort: null,
+  async downloadModel(dir, id, onProgress) {
     const m = modelById(id)
-    await openExternal(modelUrls(m)[0].url)
-    return { ok: true, file: m.file, size: m.size, url: modelUrls(m)[0].url }
+    if (!dir) throw new Error('请先选择模型存放目录')
+    const dest = modelPathIn(dir, m)
+    if (modelInstalled(dir, m)) return { file: m.file, size: fs.statSync(dest).size, done: true }
+    const token = this.modelDlAbort = { stop: false }
+    try {
+      const r = await downloadFile(modelUrls(m).map((u) => u.url), dest, {
+        minSize: 100 * 1024 * 1024, // 与 importModelFile 的完整阈值一致
+        magic: 'GGUF',
+        onProgress,
+        aborted: () => token.stop,
+      })
+      return { file: m.file, size: r.size, done: true }
+    } finally {
+      if (this.modelDlAbort === token) this.modelDlAbort = null
+    }
+  },
+  cancelModelDownload() { if (this.modelDlAbort) this.modelDlAbort.stop = true },
+  // 上次未完成的下载（.part 字节数，0 = 无）：进模型页时提示「继续下载」
+  modelPartInfo(dir, id) {
+    try { return fs.statSync(partPath(modelPathIn(dir, modelById(id)))).size } catch { return 0 }
   },
   // 手动下载的文件可能落在下载目录：选文件后拷入模型目录（按文件名匹配官方档位，大小写不敏感）
   chooseModelFile() {
