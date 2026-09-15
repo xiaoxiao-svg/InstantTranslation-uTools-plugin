@@ -8,7 +8,7 @@
 const fs = require('fs')
 const path = require('path')
 
-const TARGETS = ['dist/preload.js', 'dist/engine-unpack.js']
+const TARGETS = ['dist/preload.js', 'dist/engine-unpack.js', 'dist/download.js', 'dist/tts/tts-server.js']
 
 function isRegexStart(out) {
   const m = out.match(/(\S)\s*$/)

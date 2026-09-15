@@ -1,38 +1,39 @@
 /**
  * 本地语音合成服务（子进程，纯 Node 环境运行）
  *
- * 为什么必须单独起进程：uTools 的 preload 跑在 Chromium 渲染进程里，主线程禁止同步编译
- * 超过 4KB 的 WASM（"WebAssembly.Compile is disallowed on the main thread..."），
- * 而 sherpa-onnx 的 nodejs 构建依赖同步实例化。子进程用 ELECTRON_RUN_AS_NODE=1 启动，
- * 是纯 Node 环境，没有该限制，sherpa / wasm-bz2 都能原样使用。
+ * 为什么必须单独起进程：uTools 的 preload 跑在 Chromium 渲染进程里，原生 NAPI 插件与
+ * 大模型推理都不适合进渲染进程（阻塞 UI / 崩溃即带崩插件）。子进程用
+ * ELECTRON_RUN_AS_NODE=1 启动，是纯 Node 环境，sherpa-onnx 原生绑定原样可用。
  *
- * 由 preload.js 通过 spawn(process.execPath, [本脚本, port, voicesRoot, espeakDir, runtimeDir]) 启动。
+ * 由 preload.js 通过 spawn(process.execPath, [本脚本, port, voicesRoot, espeakDir, runtimeDir],
+ * { cwd: voicesRoot }) 启动。cwd 固定在 voices 根目录：spec 里的模型路径全部相对该目录 ——
+ * espeak-ng 在 Windows 上读不了非 ASCII 路径（中文用户名/中文目录必挂），相对路径天然避开。
  * 闲置 IDLE_MS 后自行退出（与翻译服务一样，不常驻占内存）。
  *
- * 运行时外置：sherpa-onnx / wasm-bz2 不随插件分发，存放在 runtimeDir（用户数据目录），
- * 首次用到 TTS 时由 preload 从 npm 镜像下载官方包并解压过去。因此这里对两个库的
- * require 必须是惰性的 —— 服务启动时运行时可能还没装好（/extract、/install 解压
- * 运行时本身都发生在启动之后），顶层 require 会直接把进程拉死。
+ * 运行时外置：sherpa-onnx-node（原生绑定 + onnxruntime，多线程 CPU）不随插件分发，
+ * 存放在 runtimeDir，首次用到 TTS 时由 preload 从 npm 镜像下载官方包解压过去。
+ * 因此这里对运行时的 require 必须是惰性的 —— 服务启动时运行时可能还没装好
+ * （/extract、/install 解压运行时与语音包都发生在启动之后），顶层 require 会直接把进程拉死。
  *
  * 接口（127.0.0.1:<port>，仅本机）：
  *   GET  /health                       → {status:'ok'}
  *   POST /warmup  {spec}               → {ok}
- *   POST /synth   {spec,text}          → {ok, wav(base64), sampleRate}
- *   POST /synth-stream {spec,text}     → NDJSON 流：{t:'s',sr,segs} / {t:'c',pcm} / {t:'e',n} / {t:'x',error}
+ *   POST /synth   {spec,text,sid}      → {ok, wav(base64), sampleRate}
+ *   POST /synth-stream {spec,text,sid} → NDJSON 流：{t:'s',sr,segs} / {t:'c',pcm} / {t:'e',n} / {t:'x',error}
  *   POST /install {archive,targetDir,espeakDir,expectTop} → {ok, files, topDir}
  *   POST /extract {archive,destDir}    → {ok, files}（npm tgz：gunzip → tar，剥顶层 package/）
  *
- * spec 形如 { kind:'vits'|'matcha', model|acousticModel, vocoder, lexicon, tokens, dataDir, ruleFsts }
+ * spec 形如 { kind:'vits'|'matcha'|'kokoro', model|acousticModel, voices, vocoder, lexicon,
+ *             tokens, dataDir, ruleFsts }（路径全部相对 voicesRoot）
  */
 const fs = require('fs')
 const http = require('http')
-const https = require('https')
 const path = require('path')
 const zlib = require('zlib')
+const os = require('os')
 
 const PORT = Number(process.argv[2]) || 18156
 const VOICES_ROOT = process.argv[3] || ''
-const ESPEAK_DIR = process.argv[4] || ''
 const RUNTIME_DIR = process.argv[5] || ''
 const IDLE_MS = 5 * 60 * 1000
 
@@ -40,13 +41,17 @@ const IDLE_MS = 5 * 60 * 1000
 let sherpa = null
 let Bzip2 = null
 function getSherpa() {
-  if (!sherpa) sherpa = require(path.join(RUNTIME_DIR, 'sherpa-onnx'))
+  if (!sherpa) sherpa = require(path.join(RUNTIME_DIR, 'sherpa-onnx-node'))
   return sherpa
 }
 function getBzip2() {
   if (!Bzip2) Bzip2 = require(path.join(RUNTIME_DIR, 'wasm-bz2', 'dist', 'index.js'))
   return Bzip2
 }
+
+// 原生 onnxruntime 走真多线程：8 线程实测 kokoro 长文稳态 1.4x 实时（4 线程只有 0.75x，
+// 16 线程过订阅反而掉到 0.5x），取一半物理核夹在 [4,8] 对各类机器都稳。
+const NUM_THREADS = Math.min(8, Math.max(4, os.cpus().length >> 1))
 
 const engines = {}
 let idleTimer = null
@@ -56,22 +61,33 @@ function touchIdle() {
 }
 touchIdle()
 
-// 引擎按 spec 缓存：同一语音包的多段合成复用同一个已加载模型（加载一次约 1~5 秒）
+// 引擎按 spec 缓存：同一语音包的多段合成复用同一个已加载模型（kokoro fp32 加载约 3.5 秒）
 function engineKey(spec) {
-  return [spec.kind, spec.model || spec.acousticModel, spec.vocoder || '', spec.lexicon || ''].join('|')
+  return [spec.kind, spec.model || spec.acousticModel, spec.voices || '', spec.vocoder || '', spec.lexicon || ''].join('|')
 }
 function getEngine(spec) {
   const key = engineKey(spec)
   if (!engines[key]) {
-    // WASM 构建不支持多线程（引擎内部会把 num_threads 压回 1），这里直接给 1 避免告警
-    const base = { numThreads: 1, provider: 'cpu' }
+    // numThreads / provider / debug 绑定层只在 model 这一层读（官方示例同款结构），
+    // 放进 vits/matcha/kokoro 小节会被静默忽略 —— 别再合错层
+    const base = { numThreads: NUM_THREADS, provider: 'cpu' }
+    if (process.env.TTS_DEBUG) base.debug = 1 // 临时诊断开关
     const cfg = { maxNumSentences: 1, ruleFsts: spec.ruleFsts || '' }
-    if (spec.kind === 'matcha') {
-      cfg.model = { matcha: Object.assign({ acousticModel: spec.acousticModel, vocoder: spec.vocoder, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' }, base) }
+    if (spec.kind === 'kokoro') {
+      cfg.model = Object.assign({ kokoro: {
+        model: spec.model,
+        voices: spec.voices,
+        tokens: spec.tokens,
+        lexicon: spec.lexicon || '',
+        dataDir: spec.dataDir || '',
+        lengthScale: 1.0,
+      } }, base)
+    } else if (spec.kind === 'matcha') {
+      cfg.model = Object.assign({ matcha: { acousticModel: spec.acousticModel, vocoder: spec.vocoder, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' } }, base)
     } else {
-      cfg.model = { vits: Object.assign({ model: spec.model, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' }, base) }
+      cfg.model = Object.assign({ vits: { model: spec.model, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' } }, base)
     }
-    engines[key] = getSherpa().createOfflineTts(cfg)
+    engines[key] = new (getSherpa().OfflineTts)(cfg)
   }
   return engines[key]
 }
@@ -108,7 +124,7 @@ function floatToPcmBase64(samples) {
 // 正常长度的句子保持完整，让模型自己处理语调。
 const SEG_MAX = 42
 // 首段另给一个更小的上限：首字出声时间只由第一段决定，后面还有的是时间追上来，
-// 所以只把开头切细（实测能把首块从 ~1.5s 压到 ~0.7s），后面的句子照旧保持完整。
+// 所以只把开头切细，后面的句子照旧保持完整。
 const SEG_HEAD_MAX = 14
 function splitByCommas(s, max) {
   const out = []
@@ -137,36 +153,44 @@ function splitSegments(text, maxLen, headMaxLen) {
   return out
 }
 
+// 同一时间只跑一次生成：原生合成在 onnxruntime 的工作线程里算，若两个请求并发进来
+// 会互相抢核，两边都掉速；这里串行排队，后到的请求等前一个完（或被前端掐断）。
+let genChain = Promise.resolve()
+
 /**
  * 流式合成：逐段合成、逐段推给客户端。
  *
- * 每段之后 await setImmediate 让出事件循环 —— 合成是同步阻塞的，不让出的话
- * 写进 socket 的数据要等整篇算完才会真正发出去，流式就退化成了"等全部再播"。
- * 让出之后这一段立刻上线，前端可以边播边等下一段。
+ * 段内用原生 generateAsync 的进度回调 —— 合成跑在 onnxruntime 的工作线程，JS 事件循环
+ * 不被阻塞，每算出一块就立刻写进 socket；段间顺序 await。前端可以边播边等下一段。
  */
 async function streamSynth(res, spec, text, sid, speed) {
-  const engine = getEngine(spec)
-  const segs = splitSegments(text)
   const send = (o) => { if (!res.destroyed) res.write(JSON.stringify(o) + '\n') }
-  send({ t: 's', sr: engine.sampleRate, segs: segs.length })
-  let total = 0
-  for (const seg of segs) {
-    if (res.destroyed) return            // 前端已取消（用户停止或发起新朗读）
-    touchIdle()
-    engine.generateWithConfig(seg, {
-      sid: sid || 0,
-      speed: speed || 1.0,
-      callback: (samples) => {
-        if (res.destroyed) return false  // 返回 false 让引擎提前收工
-        total += samples.length
-        send({ t: 'c', pcm: floatToPcmBase64(samples) })
-        return true
-      },
-    })
-    await new Promise((r) => setImmediate(r))
+  const run = async () => {
+    const engine = getEngine(spec)
+    const segs = splitSegments(text)
+    send({ t: 's', sr: engine.sampleRate, segs: segs.length })
+    let total = 0
+    for (const seg of segs) {
+      if (res.destroyed) return            // 前端已取消（用户停止或发起新朗读）
+      touchIdle()
+      await engine.generateAsync({
+        text: seg,
+        sid: sid || 0,
+        speed: speed || 1.0,
+        onProgress: (info) => {
+          if (res.destroyed) return 0      // 返回 0 让引擎提前收工（取消）
+          total += info.samples.length
+          send({ t: 'c', pcm: floatToPcmBase64(info.samples) })
+          return 1
+        },
+      })
+    }
+    send({ t: 'e', n: total })
+    if (!res.destroyed) res.end()
   }
-  send({ t: 'e', n: total })
-  if (!res.destroyed) res.end()
+  const mine = genChain.then(run, run)
+  genChain = mine.catch(() => {})
+  return mine
 }
 
 // tar.bz2 解压安装：bz2 容量靠递增重试（多流 bz2 的尾部 ISIZE 是垃圾值）
@@ -191,7 +215,7 @@ async function installPack(archive, targetDir, espeakDir, expectTop) {
   if (expectTop && topDir !== expectTop) {
     throw new Error('不是该语音包（顶层目录 ' + topDir + '，期望 ' + expectTop + '）')
   }
-  const sharedEspeak = espeakDir || path.join(VOICES_ROOT, '_espeak')
+  const sharedEspeak = espeakDir || '_espeak'
   fs.rmSync(targetDir, { recursive: true, force: true })
   fs.mkdirSync(targetDir, { recursive: true })
   let off = 0, files = 0
@@ -222,60 +246,8 @@ async function installPack(archive, targetDir, espeakDir, expectTop) {
   return { files, topDir }
 }
 
-// 单次 GET，跟随重定向（GitHub release 会 302 到 objects.githubusercontent.com）
-function httpGet(url, depth, onRes, onErr) {
-  if (depth > 5) return onErr(new Error('重定向次数过多'))
-  const mod = url.startsWith('https:') ? https : http
-  const req = mod.get(url, { headers: { 'User-Agent': 'utools-hy-mt2' } }, (r) => {
-    if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
-      r.resume()
-      return httpGet(new URL(r.headers.location, url).toString(), depth + 1, onRes, onErr)
-    }
-    if (r.statusCode !== 200) { r.resume(); return onErr(new Error('HTTP ' + r.statusCode)) }
-    onRes(r)
-  })
-  req.on('error', onErr)
-  req.setTimeout(120000, () => req.destroy(new Error('下载超时')))
-}
-
-// 依次尝试多个镜像，成功一个即止；先写 .part 再改名，避免半截文件被当成装好的
-async function fetchToFile(urls, dest, send) {
-  let lastErr = null
-  for (const url of urls) {
-    const tmp = dest + '.part'
-    try {
-      await new Promise((resolve, reject) => {
-        httpGet(url, 0, (r) => {
-          const total = Number(r.headers['content-length'] || 0)
-          fs.mkdirSync(path.dirname(dest), { recursive: true })
-          const out = fs.createWriteStream(tmp)
-          let got = 0, sentAt = 0
-          r.on('data', (c) => {
-            got += c.length
-            const now = Date.now()
-            if (now - sentAt > 250) { sentAt = now; send({ t: 'p', got, total }) }
-          })
-          r.on('error', reject)
-          out.on('error', reject)
-          out.on('finish', () => {
-            try { fs.renameSync(tmp, dest) } catch (e) { return reject(e) }
-            send({ t: 'p', got, total: total || got })
-            resolve()
-          })
-          r.pipe(out)
-        }, reject)
-      })
-      return
-    } catch (e) {
-      lastErr = e
-      try { fs.rmSync(tmp, { force: true }) } catch {}
-    }
-  }
-  throw lastErr || new Error('下载失败')
-}
-
 // npm 包 tgz 解压：gzip → tar，剥掉顶层 package/ 目录后平铺到 destDir。
-// 运行时外置用（sherpa-onnx / wasm-bz2 都以官方 npm tarball 形式从镜像下载）。
+// 运行时外置用（sherpa-onnx-node / wasm-bz2 / tslib 都以官方 npm tarball 形式从镜像下载）。
 // npm 的 ustar 头可能带 prefix 字段，长路径要拼上，否则文件名会被截断错位。
 function extractTarGz(archive, destDir) {
   if (!fs.existsSync(archive)) throw new Error('文件不存在: ' + archive)
@@ -351,25 +323,6 @@ const server = http.createServer(async (req, res) => {
         try { res.write(JSON.stringify({ t: 'x', error: String((e && e.message) || e) }) + '\n') } catch {}
         if (!res.destroyed) res.end()
       }
-      return
-    }
-    if (req.method === 'POST' && req.url === '/fetch') {
-      const a = JSON.parse(await readBody(req))
-      res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' })
-      const send = (o) => { if (!res.destroyed) res.write(JSON.stringify(o) + '\n') }
-      try {
-        let done = false
-        try { done = fs.statSync(a.dest).size > 0 } catch {}
-        if (done) send({ t: 'd', file: a.dest, skipped: true })
-        else {
-          await fetchToFile(a.urls || [a.url], a.dest, send)
-          send({ t: 'd', file: a.dest })
-        }
-      } catch (e) {
-        process.stderr.write('[tts-server] fetch error: ' + (e && e.stack ? e.stack : e) + '\n')
-        send({ t: 'x', error: String((e && e.message) || e) })
-      }
-      if (!res.destroyed) res.end()
       return
     }
     if (req.method === 'POST' && req.url === '/extract') {

@@ -22,6 +22,7 @@ const path = require('path')
 const fs = require('fs')
 const http = require('http')
 const { unpackArchive } = require('./engine-unpack.js')
+const { downloadFile } = require('./download.js')
 
 const FIXED_PORT = 18155
 const SLEEP_IDLE_SECONDS = 300 // 闲置 5 分钟自动睡眠（权重出内存）
@@ -573,24 +574,45 @@ function chatTranslate(text, settings) {
   })
 }
 
-// ---- TTS 本地语音朗读（sherpa-onnx WASM + 语音包按需安装）----
-// 运行时（sherpa-onnx ~16MB WASM）随插件分发；语音包按需下载安装。
-// espeak-ng-data 各语音包内容完全相同 → 只存一份共享（省 17MB/包）
-// 用 fp32 而非 int8：WASM 无 int8 优化内核，实测 int8 反而慢 36%（1.94s vs 1.43s）
+// ---- TTS 本地语音朗读（sherpa-onnx 原生运行时 + 语音包按需安装）----
+// 运行时外置下载：sherpa-onnx-node（原生 NAPI 绑定，onnxruntime CPU 多线程）+ 当前平台
+// 二进制包，npmmirror 直连；比旧 WASM 构建快数倍且支持多线程，Kokoro 82M 才跑得动。
+// espeak-ng-data 各语音包内容完全相同 → 只存一份共享（省 17MB/包）。
 //
-// 音色选型（实测，同一段中文；速度是 WASM 单线程下的真实值）：
-//   piper 华燕        2.16x 实时 / 首块 1266ms —— 韵律平，用户反馈"机械、没顿挫感"
-//   Matcha zh-en      2.85x 实时 / 首块  509ms —— 中英混排正常，故选它作中文默认
-//   Matcha zh-baker   1.96x 实时              —— 会把英文词整个丢掉（Ignore OOV 'API'/'PDF'…），
-//                                               翻译结果常夹英文术语，直接排除
-//   MeloTTS           0.20x 实时              —— 比播放慢 5 倍，边生成边播必然卡，弃
-//   Kokoro         0.10~0.22x 实时            —— 同上弃；且 JS 绑定写死 dictDir='' 导致中文 g2p 坏（Unknown token ❓）
-// matcha 架构需要额外两个共享文件：声码器（51MB）与 espeak 音素数据（7MB，读英文词用）
-const TTS_REL_BASE = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
-const TTS_MIRROR_BASE = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
-const VOCODER_BASE = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
-const VOCODER_MIRROR = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
+// 音色选型（原生 fp32 实测，18 核机 / 8 线程；实时率 = 音频时长 ÷ 合成耗时）：
+//   Kokoro v1.1-zh    1.41x 实时（长文稳态） —— 103 音色（55 中文女声 + 45 中文男声 + 3 英语），
+//                                                质量同级开源最佳，作旗舰多语种包
+//   Matcha zh-en      2.85x 实时（WASM 时代实测，原生更快）—— 轻量中文备选（127MB）
+//   piper en/华燕     2.16x 实时 —— 轻量备选；韵律平但胜在小
+//   Kokoro int8       0.4x 实时（本机原生无 VNNI 内核，反比 fp32 慢 3 倍）—— 弃
+//   MeloTTS/Kokoro(WASM) ≤0.22x —— 旧 WASM 运行时的历史结论，随运行时换血作废
+// 注意：espeak-ng 在 Windows 上打不开含中文的路径（UTF-8 进 ANSI fopen 全乱），
+// 语音服务子进程以 voices 为工作目录、所有引擎路径一律用相对路径规避。
+const TTS_REL_BASE = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
+const TTS_MIRROR_BASE = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
+const VOCODER_BASE = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
+const VOCODER_MIRROR = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
+// Kokoro 多语种包的 sid→名字对照（官方 fixed 表：sid 0~2 英/英音，3~57 中文女声，58~102 中文男声）
+const KOKORO_ZF = ['zf_001','zf_002','zf_003','zf_004','zf_005','zf_006','zf_007','zf_008','zf_017','zf_018','zf_019','zf_021','zf_022','zf_023','zf_024','zf_026','zf_027','zf_028','zf_032','zf_036','zf_038','zf_039','zf_040','zf_042','zf_043','zf_044','zf_046','zf_047','zf_048','zf_049','zf_051','zf_059','zf_060','zf_067','zf_070','zf_071','zf_072','zf_073','zf_074','zf_075','zf_076','zf_077','zf_078','zf_079','zf_083','zf_084','zf_085','zf_086','zf_087','zf_088','zf_090','zf_092','zf_093','zf_094','zf_099']
+const KOKORO_ZM = ['zm_009','zm_010','zm_011','zm_012','zm_013','zm_014','zm_015','zm_016','zm_020','zm_025','zm_029','zm_030','zm_031','zm_033','zm_034','zm_035','zm_037','zm_041','zm_045','zm_050','zm_052','zm_053','zm_054','zm_055','zm_056','zm_057','zm_058','zm_061','zm_062','zm_063','zm_064','zm_065','zm_066','zm_068','zm_069','zm_080','zm_081','zm_082','zm_089','zm_091','zm_095','zm_096','zm_097','zm_098','zm_100']
+const KOKORO_EN = ['af_maple','af_sol','bf_vale']
+function kokoroCatalog() {
+  const g = (names, start, group, label) => names.map((name, i) => ({ sid: start + i, name, group, label }))
+  return [
+    ...g(KOKORO_EN, 0, 'en', '英语'),
+    ...g(KOKORO_ZF, 3, 'zh-f', '中文女声'),
+    ...g(KOKORO_ZM, 58, 'zh-m', '中文男声'),
+  ]
+}
+// 各语言在 Kokoro 里的默认音色（zh → zf_001，en → af_maple）
+const KOKORO_DEFAULT_SID = { zh: 3, en: 0 }
 const VOICES = [
+  {
+    id: 'kokoro-v1_1', kind: 'kokoro', label: 'Kokoro 多语种', size: '348MB', flagship: true,
+    file: 'kokoro-multi-lang-v1_1.tar.bz2', dir: 'kokoro-multi-lang-v1_1', model: 'model.onnx',
+    lexicons: ['lexicon-zh.txt', 'lexicon-us-en.txt', 'lexicon-gb-en.txt'],
+    ruleFsts: ['phone-zh.fst', 'date-zh.fst', 'number-zh.fst'],
+  },
   { id: 'en-amy', lang: 'en', kind: 'vits', label: '英语 · Amy 女声', size: '64MB',
     file: 'vits-piper-en_US-amy-medium.tar.bz2', dir: 'vits-piper-en_US-amy-medium', model: 'en_US-amy-medium.onnx' },
   { id: 'en-ryan', lang: 'en', kind: 'vits', label: '英语 · Ryan 男声', size: '64MB',
@@ -598,8 +620,7 @@ const VOICES = [
   { id: 'zh-matcha', lang: 'zh', kind: 'matcha', label: '中文 · 女声 自然', size: '127MB',
     file: 'matcha-icefall-zh-en.tar.bz2', dir: 'matcha-icefall-zh-en', model: 'model-steps-3.onnx',
     lexicon: 'lexicon.txt', ruleFsts: ['phone-zh.fst', 'date-zh.fst', 'number-zh.fst'],
-    // size 是总下载量：语音包 75MB（浏览器下载后导入）+ 声码器 51MB（装完自动下）
-    // 包内自带 espeak-ng-data，中英混排的英文词能直接读
+    // size 是总下载量：语音包 75MB + 声码器 51MB（装完自动下）
     vocoder: { file: 'vocos-16khz-univ.onnx', size: '51MB' } },
   { id: 'zh-huayan', lang: 'zh', kind: 'vits', label: '中文 · 华燕 女声', size: '64MB',
     file: 'vits-piper-zh_CN-huayan-medium.tar.bz2', dir: 'vits-piper-zh_CN-huayan-medium', model: 'zh_CN-huayan-medium.onnx' },
@@ -609,34 +630,54 @@ function espeakShared() { return path.join(voicesRoot(), '_espeak') }
 function voiceDirOf(id) { return path.join(voicesRoot(), id) }
 function voiceById(id) { return VOICES.find(v => v.id === id) }
 function vocoderPath(v) { return path.join(voicesRoot(), '_vocoder', path.basename(v.vocoder.file)) }
-// 装了模型还不够：matcha 架构必须连声码器一起就位；需要读英文词的还要 espeak 数据
+// 装了模型还不够：kokoro 要 voices.bin，matcha 架构必须连声码器一起就位
 function voiceInstalled(v) {
   try {
     if (!fs.existsSync(path.join(voiceDirOf(v.id), v.model))) return false
+    if (v.kind === 'kokoro' && !fs.existsSync(path.join(voiceDirOf(v.id), 'voices.bin'))) return false
     if (v.vocoder && !fs.existsSync(vocoderPath(v))) return false
     return true
   } catch { return false }
 }
-// 引擎配置：vits 与 matcha 字段不同，统一在这里拼，子进程只认 spec
+// 引擎配置：vits / matcha / kokoro 字段不同，统一在这里拼，子进程只认 spec。
+// 路径全部相对 voices 根目录 —— 语音服务子进程以该目录为 cwd（espeak-ng 在 Windows
+// 上读不了非 ASCII 路径，绝对路径里只要带中文用户名/桌面等就崩，相对路径天然避开）。
 function voiceSpec(v) {
-  const d = voiceDirOf(v.id)
-  const espeak = espeakShared()
-  const dataDir = fs.existsSync(espeak) ? espeak : ''
+  const d = v.id
+  const espeak = '_espeak'
+  const dataDir = fs.existsSync(path.join(voicesRoot(), espeak)) ? espeak : ''
+  if (v.kind === 'kokoro') {
+    return {
+      kind: 'kokoro',
+      model: d + '/' + v.model,
+      voices: d + '/voices.bin',
+      tokens: d + '/tokens.txt',
+      lexicon: (v.lexicons || []).map(f => d + '/' + f).join(','),
+      dataDir,
+      ruleFsts: (v.ruleFsts || []).map(f => d + '/' + f).join(','),
+    }
+  }
   if (v.kind === 'matcha') {
     return {
       kind: 'matcha',
-      acousticModel: path.join(d, v.model),
-      vocoder: vocoderPath(v),
-      lexicon: path.join(d, v.lexicon || 'lexicon.txt'),
-      tokens: path.join(d, 'tokens.txt'),
+      acousticModel: d + '/' + v.model,
+      vocoder: '_vocoder/' + path.basename(v.vocoder.file),
+      lexicon: d + '/' + (v.lexicon || 'lexicon.txt'),
+      tokens: d + '/tokens.txt',
       dataDir,
-      ruleFsts: (v.ruleFsts || []).map(f => path.join(d, f)).join(','),
+      ruleFsts: (v.ruleFsts || []).map(f => d + '/' + f).join(','),
     }
   }
-  return { kind: 'vits', model: path.join(d, v.model), tokens: path.join(d, 'tokens.txt'), dataDir }
+  return { kind: 'vits', model: d + '/' + v.model, tokens: d + '/tokens.txt', dataDir }
 }
 function voicePackInfo() {
-  return { voices: VOICES.map(v => ({ ...v, installed: voiceInstalled(v) })), espeakReady: fs.existsSync(espeakShared()) }
+  return {
+    voices: VOICES.map(v => ({ ...v, installed: voiceInstalled(v) })),
+    espeakReady: fs.existsSync(espeakShared()),
+    runtimeReady: ttsRuntimeReady(),
+    kokoroVoices: kokoroCatalog(),
+    kokoroDefaultSid: KOKORO_DEFAULT_SID,
+  }
 }
 function removeVoicePack(id) {
   fs.rmSync(voiceDirOf(id), { recursive: true, force: true })
@@ -685,6 +726,8 @@ function startTtsServer() {
       env: Object.assign({}, process.env || {}, { ELECTRON_RUN_AS_NODE: '1' }),
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
+      // cwd 固定在 voices 根：spec 里的模型路径全部相对这里（espeak-ng 读不了非 ASCII 路径）
+      cwd: voicesRoot(),
     })
   } catch (e) {
     return Promise.reject(new Error('语音服务启动失败: ' + e.message))
@@ -738,59 +781,56 @@ async function ttsCall(apiPath, body, timeoutMs) {
   }
   return r.json
 }
-// 应用内下载（带进度）：声码器这种 51MB 的附属文件，让用户"跳浏览器再手动导入"
-// 太折腾，这里直接下。进度按 NDJSON 回传，界面照常显示 MB 数。
-async function fetchVoiceAsset(urls, dest, onProgress) {
-  await ensureTtsServer()
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ urls, dest })
-    const req = http.request({
-      host: '127.0.0.1', port: TTS_PORT, path: '/fetch', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    })
-    let buf = '', err = null
-    req.on('response', (res) => {
-      res.setEncoding('utf8')
-      res.on('data', (d) => {
-        buf += d
-        let i
-        while ((i = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, i)
-          buf = buf.slice(i + 1)
-          if (!line.trim()) continue
-          let msg
-          try { msg = JSON.parse(line) } catch { continue }
-          if (msg.t === 'p') { if (onProgress) onProgress(msg.got, msg.total) }
-          else if (msg.t === 'x') err = msg.error
-        }
-      })
-      res.on('end', () => { err ? reject(new Error(err)) : resolve(true) })
-    })
-    req.on('error', reject)
-    req.end(body)
+// 应用内下载（与模型/引擎同一套 download.js）：多镜像自动换源 + Range 断点续传 +
+// 背压 + 进度回调，Kokoro 这种 348MB 的大包中途断网也能接着下，不用从头来。
+// 返回 { cancel() }，界面可中断（.part 保留供下次续传）。
+function voiceDownload(urls, dest, onProgress) {
+  let cancelled = false
+  const promise = downloadFile(urls, dest, {
+    onProgress: (p) => {
+      if (onProgress) {
+        onProgress(p.received, p.total, p.speed)
+      }
+    },
+    aborted: () => cancelled,
   })
+  return { promise, cancel: () => { cancelled = true } }
 }
 
 // ---- 语音合成运行时（外置）----
-// sherpa-onnx(4.3MB) + wasm-bz2(0.3MB) + tslib(0.01MB) 的 WASM/JS 不随插件分发（否则插件包
-// 从百 KB 涨到 17MB），首次用到 TTS 时从 npm 镜像拉官方 tarball（npmmirror 国内直连，
-// npmjs 兜底），解压到用户数据目录 tts-runtime/。版本锁定在常量里，升级 = 改常量（自动重下）。
+// 原生 sherpa-onnx-node 不随插件分发（win 平台二进制解压 22MB，全平台塞进来插件包要破百 MB），
+// 首次用到 TTS 时从 npm 镜像拉官方 tarball（npmmirror 国内直连，npmjs 兜底）解压到
+// tts-runtime/。版本锁定在常量里，升级 = 改常量（自动重下）。
+// 平台二进制必须落在 sherpa-onnx-node/node_modules/sherpa-onnx-<平台>-<架构>/ ——
+// 绑定层 addon.js 按该相对位置 require 平台 .node。
+// wasm-bz2 + tslib 仍要装：语音包是 tar.bz2，解压靠它（合成本身已不用 WASM）。
 // tslib 是 wasm-bz2 的运行依赖：它 require('tslib') 时从 wasm-bz2/dist 向上找 node_modules，
 // 所以必须落在 tts-runtime/node_modules/tslib 这个相对位置，解压到别处找不到。
-const SHERPA_VERSION = '1.13.8'
+const SHERPA_NODE_VERSION = '1.13.8'
 const WASM_BZ2_VERSION = '0.3.0'
 const TSLIB_VERSION = '2.8.1'
-const TTS_RUNTIME_VERSION = 'sherpa-onnx@' + SHERPA_VERSION + ' wasm-bz2@' + WASM_BZ2_VERSION + ' tslib@' + TSLIB_VERSION
+const TTS_RUNTIME_VERSION = 'sherpa-onnx-node@' + SHERPA_NODE_VERSION + ' wasm-bz2@' + WASM_BZ2_VERSION + ' tslib@' + TSLIB_VERSION
 const NPM_MIRROR = 'https://registry.npmmirror.com'
 const NPM_OFFICIAL = 'https://registry.npmjs.org'
 function ttsRuntimeDir() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'tts-runtime') }
-// 就绪判定：版本标记一致 + 关键文件都在（.wasm 是本体，缺了就是半截安装）
+// 当前平台对应的原生二进制包名（sherpa-onnx npm 的平台包命名规则）
+function sherpaPlatformPkg() {
+  const p = process.platform, a = process.arch
+  const plat = p === 'win32' ? 'win' : p
+  if ((p === 'win32' || p === 'linux' || p === 'darwin') && (a === 'x64' || a === 'arm64')) {
+    return 'sherpa-onnx-' + plat + '-' + a
+  }
+  return '' // 其余平台无官方原生包，TTS 不可用（界面会提示）
+}
+// 就绪判定：版本标记一致 + 关键文件都在（平台 .node 是本体，缺了就是半截安装）
 function ttsRuntimeReady() {
   try {
     const root = ttsRuntimeDir()
+    const pkg = sherpaPlatformPkg()
+    if (!pkg) return false
     return fs.readFileSync(path.join(root, 'version.txt'), 'utf8').trim() === TTS_RUNTIME_VERSION &&
-      fs.existsSync(path.join(root, 'sherpa-onnx', 'index.js')) &&
-      fs.existsSync(path.join(root, 'sherpa-onnx', 'sherpa-onnx-wasm-nodejs.wasm')) &&
+      fs.existsSync(path.join(root, 'sherpa-onnx-node', 'non-streaming-tts.js')) &&
+      fs.existsSync(path.join(root, 'sherpa-onnx-node', 'node_modules', pkg, 'sherpa-onnx.node')) &&
       fs.existsSync(path.join(root, 'wasm-bz2', 'wasm', 'module.wasm')) &&
       fs.existsSync(path.join(root, 'node_modules', 'tslib', 'tslib.js'))
   } catch { return false }
@@ -798,6 +838,8 @@ function ttsRuntimeReady() {
 let ttsRuntimeEnsuring = null
 function ensureTtsRuntime(onPhase) {
   if (ttsRuntimeReady()) return Promise.resolve(true)
+  const pkg = sherpaPlatformPkg()
+  if (!pkg) return Promise.reject(new Error('当前平台（' + process.platform + '/' + process.arch + '）暂无语音运行时'))
   // 并发保护：一键安装与后台预热可能同时触发，只下载一次
   if (!ttsRuntimeEnsuring) {
     ttsRuntimeEnsuring = downloadTtsRuntime(onPhase).finally(() => { ttsRuntimeEnsuring = null })
@@ -807,24 +849,28 @@ function ensureTtsRuntime(onPhase) {
 async function downloadTtsRuntime(onPhase) {
   const root = ttsRuntimeDir()
   fs.rmSync(root, { recursive: true, force: true })
+  const pkg = sherpaPlatformPkg()
   const pkgs = [
-    { name: 'sherpa-onnx', file: 'sherpa-onnx-' + SHERPA_VERSION + '.tgz', dest: 'sherpa-onnx' },
+    { name: 'sherpa-onnx-node', file: 'sherpa-onnx-node-' + SHERPA_NODE_VERSION + '.tgz', dest: 'sherpa-onnx-node' },
+    { name: pkg, file: pkg + '-' + SHERPA_NODE_VERSION + '.tgz', dest: path.join('sherpa-onnx-node', 'node_modules', pkg) },
     { name: '@foxglove/wasm-bz2', file: 'wasm-bz2-' + WASM_BZ2_VERSION + '.tgz', dest: 'wasm-bz2' },
     { name: 'tslib', file: 'tslib-' + TSLIB_VERSION + '.tgz', dest: path.join('node_modules', 'tslib') },
   ]
-  try {
-    for (const p of pkgs) {
-      const tgz = path.join(root, p.file)
-      const urls = [NPM_MIRROR + '/' + p.name + '/-/' + p.file, NPM_OFFICIAL + '/' + p.name + '/-/' + p.file]
-      await fetchVoiceAsset(urls, tgz, (got, total) => {
+  for (const p of pkgs) {
+    const tgz = path.join(root, p.file)
+    const dl = voiceDownload(
+      [NPM_MIRROR + '/' + p.name + '/-/' + p.file, NPM_OFFICIAL + '/' + p.name + '/-/' + p.file],
+      tgz,
+      (got, total) => {
         if (onPhase) onPhase(`下载运行时 ${p.name} ${(got / 1048576).toFixed(1)}MB` + (total ? ' / ' + (total / 1048576).toFixed(1) + 'MB' : '') + '...')
       })
-      if (onPhase) onPhase('解压运行时 ' + p.name + '...')
-      await ttsCall('/extract', { archive: tgz, destDir: path.join(root, p.dest) }, 120000)
-      fs.rmSync(tgz, { force: true })
+    try {
+      await dl.promise
+    } finally {
+      try { fs.rmSync(tgz, { force: true }) } catch {}
     }
-  } finally {
-    for (const p of pkgs) { try { fs.rmSync(path.join(root, p.file), { force: true }) } catch {} }
+    if (onPhase) onPhase('解压运行时 ' + p.name + '...')
+    await ttsCall('/extract', { archive: tgz, destDir: path.join(root, p.dest) }, 120000)
   }
   fs.mkdirSync(root, { recursive: true })
   fs.writeFileSync(path.join(root, 'version.txt'), TTS_RUNTIME_VERSION)
@@ -863,39 +909,49 @@ async function installVoicePack(archivePath, onPhase) {
   }
   const vv = voiceById(id)
   if (!vv) throw new Error('安装后未找到模型文件')
-  await ensureVocoder(vv, onPhase)
+  await ensureVocoder(vv, { onPhase })
   if (!voiceInstalled(vv)) throw new Error('安装后未找到模型文件')
   return { id, files: r.files }
 }
 // matcha 架构的附属文件（各包共用一份，装在 voices/_vocoder）
-async function ensureVocoder(vv, onPhase) {
+async function ensureVocoder(vv, opts) {
+  const onPhase = opts && opts.onPhase
   if (!vv.vocoder || fs.existsSync(vocoderPath(vv))) return
   const vd = vv.vocoder
   onPhase && onPhase('下载声码器（' + (vd.size || '') + '）...')
-  await fetchVoiceAsset([VOCODER_BASE + '/' + vd.file, VOCODER_MIRROR + '/' + vd.file], vocoderPath(vv), (got, total) => {
+  const dl = voiceDownload([VOCODER_BASE + '/' + vd.file, VOCODER_MIRROR + '/' + vd.file], vocoderPath(vv), (got, total) => {
     if (onPhase) onPhase(`下载声码器 ${(got / 1048576).toFixed(1)}MB` + (total ? ' / ' + (total / 1048576).toFixed(1) + 'MB' : '') + '...')
   })
+  await dl.promise
 }
 
 /**
  * 应用内下载并安装单个语音包（不跳浏览器、不需要用户找文件再导入）。
- * 下载 → 解压 → （matcha）补声码器 → 校验，最后删掉压缩包只留解压产物。
+ * 下载（多镜像 + 断点续传）→ 解压 → （matcha）补声码器 → 校验，最后删掉压缩包只留解压产物。
  */
-async function downloadAndInstallVoice(id, onPhase) {
+async function downloadAndInstallVoice(id, opts) {
+  const onPhase = opts && opts.onPhase
+  const onProgress = opts && opts.onProgress
   const v = voiceById(id)
   if (!v) throw new Error('未知语音包: ' + id)
   if (voiceInstalled(v)) return { id, skipped: true }
   await ensureTtsRuntime(onPhase) // 解压语音包用的 wasm-bz2 就在运行时里
   const dest = path.join(voicesRoot(), '_downloads', v.file)
+  fs.mkdirSync(path.dirname(dest), { recursive: true })
   try {
     if (!fs.existsSync(dest)) {
-      await fetchVoiceAsset([TTS_REL_BASE + '/' + v.file, TTS_MIRROR_BASE + '/' + v.file], dest, (got, total) => {
+      const dl = voiceDownload([TTS_REL_BASE + '/' + v.file, TTS_MIRROR_BASE + '/' + v.file], dest, (got, total) => {
         if (onPhase) onPhase(`下载 ${v.file} ${(got / 1048576).toFixed(0)}MB` + (total ? ' / ' + (total / 1048576).toFixed(0) + 'MB' : '') + '...')
+        if (onProgress) onProgress(got, total)
       })
+      if (opts && opts.getCancel) opts.getCancel(() => dl.cancel())
+      await dl.promise
+    } else if (onPhase) {
+      onPhase('发现上次未装完的下载，直接解压安装...')
     }
-    onPhase && onPhase('解压安装中（大包需要十几秒）...')
-    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: espeakShared(), expectTop: v.dir }, 180000)
-    await ensureVocoder(v, onPhase)
+    onPhase && onPhase('解压安装中（大包需要 10~60 秒）...')
+    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: espeakShared(), expectTop: v.dir }, 600000)
+    await ensureVocoder(v, { onPhase })
     if (!voiceInstalled(v)) throw new Error('安装后未找到模型文件')
     return { id, files: r.files }
   } finally {
@@ -903,17 +959,22 @@ async function downloadAndInstallVoice(id, onPhase) {
   }
 }
 
-// 一键装齐推荐组合（英语 Amy + 中文 Matcha 女声），已装的自动跳过。
-// 用户只按一次、全程应用内下载、装完由渲染层自动启用 —— 不用来回导入、不用挑包。
-const VOICE_BUNDLE = ['en-amy', 'zh-matcha']
-async function installVoiceBundle(onPhase) {
+// 一键启用 = 只装旗舰 Kokoro 多语种包（103 音色一次到位），已装的自动跳过。
+// 用户只按一次：运行时 + 语音包全程应用内下载，装完由渲染层自动选默认音色并预热。
+const VOICE_BUNDLE = ['kokoro-v1_1']
+async function installVoiceBundle(opts) {
   const installed = []
   for (let i = 0; i < VOICE_BUNDLE.length; i++) {
     const v = voiceById(VOICE_BUNDLE[i])
     if (!v) continue
     if (voiceInstalled(v)) { installed.push(v.id); continue }
-    const tag = `（${i + 1}/${VOICE_BUNDLE.length}）`
-    await downloadAndInstallVoice(v.id, (msg) => { if (onPhase) onPhase(tag + msg) })
+    const tag = VOICE_BUNDLE.length > 1 ? `（${i + 1}/${VOICE_BUNDLE.length}）` : ''
+    const o = opts || {}
+    await downloadAndInstallVoice(v.id, {
+      onPhase: (msg) => { if (o.onPhase) o.onPhase(tag + msg) },
+      onProgress: (got, total) => { if (o.onProgress) o.onProgress(got, total) },
+      getCancel: o.getCancel,
+    })
     installed.push(v.id)
   }
   return { installed }
@@ -935,13 +996,21 @@ async function openVoicePackDownload(id) {
   return { ok: true, file: v.file, size: v.size }
 }
 
-async function ttsSynthesize(text, voiceId) {
-  const v = voiceById(voiceId)
+// 语音引用："包id" 或 "包id:sid"（kokoro 一包多音色，sid 选具体人）
+function parseVoiceRef(ref) {
+  const s = String(ref || '')
+  const i = s.indexOf(':')
+  return { id: i < 0 ? s : s.slice(0, i), sid: i < 0 ? undefined : Number(s.slice(i + 1)) || 0 }
+}
+
+async function ttsSynthesize(text, voiceRef) {
+  const { id, sid } = parseVoiceRef(voiceRef)
+  const v = voiceById(id)
   if (!v) return { ok: false, reason: '未知语音包' }
   if (!voiceInstalled(v)) return { ok: false, reason: '语音包未安装' }
   try {
     await ensureTtsRuntime()
-    const r = await ttsCall('/synth', { spec: voiceSpec(v), text }, 120000)
+    const r = await ttsCall('/synth', { spec: voiceSpec(v), text, sid: sid || 0 }, 120000)
     return { ok: true, wav: r.wav, sampleRate: r.sampleRate }
   } catch (e) {
     return { ok: false, reason: e.message }
@@ -956,9 +1025,10 @@ async function ttsSynthesize(text, voiceId) {
  * 播放速度的 2 倍，所以队列只会越攒越多，不会断）。
  * 返回 { cancel() }，用户停止或发起新朗读时调用。
  */
-function ttsSpeakStream(text, voiceId, handlers) {
+function ttsSpeakStream(text, voiceRef, handlers) {
   const h = handlers || {}
-  const v = voiceById(voiceId)
+  const { id, sid } = parseVoiceRef(voiceRef)
+  const v = voiceById(id)
   let finished = false
   let cancelled = false
   let sr = 22050
@@ -983,7 +1053,7 @@ function ttsSpeakStream(text, voiceId, handlers) {
       if (!voiceInstalled(v)) throw new Error('语音包未安装')
       await ensureTtsRuntime()
       await ensureTtsServer()
-      const body = JSON.stringify({ spec: voiceSpec(v), text })
+      const body = JSON.stringify({ spec: voiceSpec(v), text, sid: sid || 0 })
       const req = http.request({
         host: '127.0.0.1', port: TTS_PORT, path: '/synth-stream', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
@@ -1027,10 +1097,11 @@ function ttsSpeakStream(text, voiceId, handlers) {
 
   return { cancel }
 }
-// 预热：起服务并把已启用语音包的引擎先建好（首次约 3~7 秒）
-function ttsWarmup(voiceIds) {
-  const ids = Array.isArray(voiceIds) && voiceIds.length ? voiceIds : VOICES.filter(voiceInstalled).map(v => v.id)
-  const list = ids.map(voiceById).filter(v => v && voiceInstalled(v))
+// 预热：起服务并把已启用语音包的引擎先建好（原生 kokoro 首次约 3.5 秒）。
+// 入参可以是 "包id" 或 "包id:sid"（预热只到引擎加载，sid 不影响引擎键）。
+function ttsWarmup(voiceRefs) {
+  const refs = Array.isArray(voiceRefs) && voiceRefs.length ? voiceRefs : VOICES.filter(voiceInstalled).map(v => v.id)
+  const list = refs.map(r => voiceById(parseVoiceRef(r).id)).filter((v, i, a) => v && voiceInstalled(v) && a.indexOf(v) === i)
   if (!list.length) return { ok: true, warmed: [] }
   ;(async () => {
     try {
