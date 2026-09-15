@@ -177,6 +177,10 @@ async function streamSynth(res, spec, text, sid, speed) {
         text: seg,
         sid: sid || 0,
         speed: speed || 1.0,
+        // Electron 给内嵌 Node 打了禁用 napi 外部缓冲区的补丁（ELECTRON_RUN_AS_NODE 也拦），
+        // 默认的 external buffer 直接抛 "External buffers are not allowed"——必须关掉，
+        // 让插件走拷贝模式的普通 Float32Array（代价只是每块一次拷贝）
+        enableExternalBuffer: false,
         onProgress: (info) => {
           if (res.destroyed) return 0      // 返回 0 让引擎提前收工（取消）
           total += info.samples.length
@@ -300,12 +304,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/warmup') {
       const a = JSON.parse(await readBody(req))
       const engine = getEngine(a.spec)
-      engine.generate({ text: 'a', sid: 0, speed: 1.0 }) // JIT 预热
+      engine.generate({ text: 'a', sid: 0, speed: 1.0, enableExternalBuffer: false }) // JIT 预热（开关说明见 streamSynth）
       return reply(res, 200, { ok: true })
     }
     if (req.method === 'POST' && req.url === '/synth') {
       const a = JSON.parse(await readBody(req))
-      const audio = getEngine(a.spec).generate({ text: a.text, sid: a.sid || 0, speed: a.speed || 1.0 })
+      const audio = getEngine(a.spec).generate({ text: a.text, sid: a.sid || 0, speed: a.speed || 1.0, enableExternalBuffer: false }) // 开关说明见 streamSynth
       return reply(res, 200, { ok: true, wav: floatToWavBase64(audio.samples, audio.sampleRate), sampleRate: audio.sampleRate })
     }
     if (req.method === 'POST' && req.url === '/synth-stream') {
