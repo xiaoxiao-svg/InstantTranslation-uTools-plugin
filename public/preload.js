@@ -630,11 +630,14 @@ function espeakShared() { return path.join(voicesRoot(), '_espeak') }
 function voiceDirOf(id) { return path.join(voicesRoot(), id) }
 function voiceById(id) { return VOICES.find(v => v.id === id) }
 function vocoderPath(v) { return path.join(voicesRoot(), '_vocoder', path.basename(v.vocoder.file)) }
-// 装了模型还不够：kokoro 要 voices.bin，matcha 架构必须连声码器一起就位
+// 装了模型还不够：kokoro 要 voices.bin + 包内私有 espeak 数据，matcha 架构必须连声码器一起就位
 function voiceInstalled(v) {
   try {
     if (!fs.existsSync(path.join(voiceDirOf(v.id), v.model))) return false
-    if (v.kind === 'kokoro' && !fs.existsSync(path.join(voiceDirOf(v.id), 'voices.bin'))) return false
+    if (v.kind === 'kokoro') {
+      if (!fs.existsSync(path.join(voiceDirOf(v.id), 'voices.bin'))) return false
+      if (!fs.existsSync(path.join(voiceDirOf(v.id), '_espeak', 'phontab'))) return false
+    }
     if (v.vocoder && !fs.existsSync(vocoderPath(v))) return false
     return true
   } catch { return false }
@@ -653,7 +656,9 @@ function voiceSpec(v) {
       voices: d + '/voices.bin',
       tokens: d + '/tokens.txt',
       lexicon: (v.lexicons || []).map(f => d + '/' + f).join(','),
-      dataDir,
+      // espeak 用包内私有目录，不吃共享 _espeak：旧轻量包留下的可能是 7MB 子集，
+      // 安装时的"已存在跳过"会让 Kokoro 缺文件（它需要完整 17MB 版）
+      dataDir: d + '/_espeak',
       ruleFsts: (v.ruleFsts || []).map(f => d + '/' + f).join(','),
     }
   }
@@ -722,6 +727,8 @@ function startTtsServer() {
   if (!fs.existsSync(script)) return Promise.reject(new Error('语音服务脚本缺失: ' + script))
   ttsStderr = ''
   try {
+    // cwd 必须真实存在，spawn 才能起进程（首次使用时 voices 目录还没建过）
+    fs.mkdirSync(voicesRoot(), { recursive: true })
     ttsProc = spawn(process.execPath, [script, String(TTS_PORT), voicesRoot(), espeakShared(), ttsRuntimeDir()], {
       env: Object.assign({}, process.env || {}, { ELECTRON_RUN_AS_NODE: '1' }),
       stdio: ['ignore', 'ignore', 'pipe'],
@@ -864,13 +871,10 @@ async function downloadTtsRuntime(onPhase) {
       (got, total) => {
         if (onPhase) onPhase(`下载运行时 ${p.name} ${(got / 1048576).toFixed(1)}MB` + (total ? ' / ' + (total / 1048576).toFixed(1) + 'MB' : '') + '...')
       })
-    try {
-      await dl.promise
-    } finally {
-      try { fs.rmSync(tgz, { force: true }) } catch {}
-    }
+    await dl.promise
     if (onPhase) onPhase('解压运行时 ' + p.name + '...')
     await ttsCall('/extract', { archive: tgz, destDir: path.join(root, p.dest) }, 120000)
+    fs.rmSync(tgz, { force: true }) // 解压成功才删包，失败留着（.part 还能续传补齐）
   }
   fs.mkdirSync(root, { recursive: true })
   fs.writeFileSync(path.join(root, 'version.txt'), TTS_RUNTIME_VERSION)
@@ -895,9 +899,9 @@ async function installVoicePack(archivePath, onPhase) {
   const r = await ttsCall('/install', {
     archive: archivePath,
     targetDir: voice ? voiceDirOf(voice.id) : path.join(voicesRoot(), '_incoming'),
-    espeakDir: espeakShared(),
+    espeakDir: voice && voice.kind === 'kokoro' ? path.join(voiceDirOf(voice.id), '_espeak') : espeakShared(),
     expectTop: voice ? voice.dir : '',
-  }, 180000)
+  }, voice && voice.kind === 'kokoro' ? 600000 : 180000)
   let id = voice ? voice.id : ''
   if (!id) {
     // 文件名没匹配上：用子进程返回的顶层目录反查
@@ -949,8 +953,8 @@ async function downloadAndInstallVoice(id, opts) {
     } else if (onPhase) {
       onPhase('发现上次未装完的下载，直接解压安装...')
     }
-    onPhase && onPhase('解压安装中（大包需要 10~60 秒）...')
-    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: espeakShared(), expectTop: v.dir }, 600000)
+    onPhase && onPhase('解压安装中（Kokoro 大包约 1~2 分钟，轻量包十几秒）...')
+    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: v.kind === 'kokoro' ? path.join(voiceDirOf(v.id), '_espeak') : espeakShared(), expectTop: v.dir }, 600000)
     await ensureVocoder(v, { onPhase })
     if (!voiceInstalled(v)) throw new Error('安装后未找到模型文件')
     return { id, files: r.files }

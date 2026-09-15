@@ -10,6 +10,7 @@
  * 单源最多试 3 次（网络错误同源续传重试），仍败则换下一源（跨源续传：同一官方文件的镜像字节一致）
  */
 const fs = require('fs')
+const path = require('path')
 const https = require('https')
 
 function partPath(dest) { return dest + '.part' }
@@ -18,6 +19,12 @@ const ABORT = () => Object.assign(new Error('已取消'), { code: 'aborted' })
 // 单次请求：跟随重定向并落盘。resolve({ size }) 表示整个文件完成
 function fetchToFile(url, part, startByte, opts) {
   return new Promise((resolve, reject) => {
+    // settle 保证恰好一次收口：写盘流在收尾阶段报错时（杀软扫描锁文件、目录竞态都会），
+    // out 的 error 与 out.end 的回调可能都触发——不设防会出现"既不 resolve 也不 reject"
+    // 的悬死 Promise（真机表现：下载界面永远停在原地，连错误框都没有）
+    let settled = false
+    const ok = (v) => { if (!settled) { settled = true; resolve(v) } }
+    const fail = (e) => { if (!settled) { settled = true; reject(e) } }
     const req = https.get(url, {
       // ModelScope 的 LFS CDN（cdn-lfs-cn-1）对无 User-Agent 的请求回 403，Node 默认不发 UA，必须补
       headers: {
@@ -27,12 +34,12 @@ function fetchToFile(url, part, startByte, opts) {
     }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume()
-        return resolve({ redirect: new URL(res.headers.location, url).href })
+        return ok({ redirect: new URL(res.headers.location, url).href })
       }
-      if (res.statusCode === 416) return resolve({ reset: true }) // .part 超全长：删掉重来
+      if (res.statusCode === 416) return ok({ reset: true }) // .part 超全长：删掉重来
       if (res.statusCode !== 200 && res.statusCode !== 206) {
         res.resume()
-        return reject(new Error('HTTP ' + res.statusCode))
+        return fail(new Error('HTTP ' + res.statusCode))
       }
       const append = res.statusCode === 206 && startByte > 0
       const base = append ? startByte : 0
@@ -40,21 +47,23 @@ function fetchToFile(url, part, startByte, opts) {
       const total = len ? base + len : 0
       if (append && total && startByte >= total) { // .part 已达全长：续传头多余，直接走校验
         res.resume()
-        return resolve({ size: startByte, total })
+        return ok({ size: startByte, total })
       }
+      // 目标目录可能还不存在（TTS 运行时/语音包首次下载都写进新建目录），必须先建
+      fs.mkdirSync(path.dirname(part), { recursive: true })
       const out = fs.createWriteStream(part, { flags: append ? 'a' : 'w' })
       let received = base
       let lastT = Date.now()
       let lastB = base
-      let done = false
-      out.on('error', (e) => { if (!done) { done = true; res.destroy(); reject(e) } })
-      res.on('error', (e) => { if (!done) { done = true; out.destroy(); reject(e) } })
-      out.on('drain', () => { if (!done) res.resume() })
+      let ended = false
+      out.on('error', (e) => { fail(e); res.destroy() })
+      res.on('error', (e) => fail(e))
+      out.on('drain', () => { if (!ended) res.resume() })
       res.on('data', (buf) => {
-        if (done) return
+        if (settled) return
         if (opts.aborted && opts.aborted()) {
-          done = true; res.destroy(); out.destroy()
-          return reject(ABORT())
+          ended = true; res.destroy(); out.destroy()
+          return fail(ABORT())
         }
         received += buf.length
         if (!out.write(buf)) res.pause()
@@ -66,20 +75,23 @@ function fetchToFile(url, part, startByte, opts) {
         }
       })
       res.on('end', () => {
-        if (done) return
-        done = true
+        if (settled) return
+        ended = true
         out.end(() => {
-          const size = fs.statSync(part).size
-          if (total && size !== total) return reject(new Error('文件不完整：' + size + '/' + total + ' 字节'))
-          if (opts.onProgress) opts.onProgress({ received: size, total: size, speed: 0, done: true })
-          resolve({ size })
+          if (settled) return
+          try {
+            const size = fs.statSync(part).size
+            if (total && size !== total) return fail(new Error('文件不完整：' + size + '/' + total + ' 字节'))
+            if (opts.onProgress) opts.onProgress({ received: size, total: size, speed: 0, done: true })
+            ok({ size })
+          } catch (e) { fail(e) }
         })
       })
     })
     req.setTimeout(opts.idleMs || 30000, () => {
       req.destroy(opts.aborted && opts.aborted() ? ABORT() : new Error('连接空闲超时（' + ((opts.idleMs || 30000) / 1000) + 's 无数据）'))
     })
-    req.on('error', (e) => reject(e))
+    req.on('error', (e) => fail(e))
   })
 }
 
