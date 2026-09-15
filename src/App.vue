@@ -744,6 +744,8 @@ const kokoroGroups = computed(() => {
   })).filter(g => g.items.length)
 })
 function isKokoro(lang) { return voicePackMap.value[lang] === 'kokoro-v1_1' }
+// 某语言的轻量语音包列表（旗舰 Kokoro 不进这个列表，它有自己的音色选择器）
+function voiceOf(lang) { return voiceList.value.filter(v => v.lang === lang) }
 function refreshVoices() {
   try {
     const info = p.voicePackInfo ? p.voicePackInfo() : { voices: [] }
