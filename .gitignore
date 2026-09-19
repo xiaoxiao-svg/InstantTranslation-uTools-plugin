@@ -1,13 +1,20 @@
 # 依赖与构建临时物
+.delivery-review/
 node_modules/
 *.log
 .DS_Store
 dist/
+
+# 文档记录
+docs/
+
 # 大二进制（模型不入库）
 *.gguf
 *.bin
+
 # 测试残留
 tmp-*.js
 tmp-*.cjs
+
 # 宣传图
 promotion/

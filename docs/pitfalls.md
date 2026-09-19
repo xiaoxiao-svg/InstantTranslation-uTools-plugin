@@ -68,3 +68,15 @@
 - **代码/任务改动先建分支**（`类型-简短描述`），验收后等用户表态再合并或丢弃；纯文档、无关紧要文件（logo 等）可直接提交主干。
 - commit 格式 `类型: 描述`（feat/fix/docs/refactor）。
 - 本地构建/测试通 ≠ 跨平台可用：mac 专属坑 Windows 全零症状（见第 3 节），跨平台改动必须用真实平台包验证。
+
+## 9. 本地朗读（TTS / sherpa-onnx）
+
+- **量化档位不是越小越快**：本机（无 AVX512-VNNI）实测小雅 int8 短句 1015ms、fp32 只要 115ms——**int8 慢了 5~8 倍**，与早年 Kokoro int8 翻车同源；**fp16 档更糟，加载即让原生模块崩溃**。选型前先跑 `scripts/tts-quant-bench.cjs` 实测，别照抄别人的体积-速度结论。
+- **中文 piper 模型有两条互斥的音素化路线**，配错就是没声或念乱码：`xiao_ya`/`chaowen` 走拼音词典（`lexicon.txt` + `phone/date/number.fst`，**绝不能传 dataDir**）；`huayan` 之类走 `espeak-ng-data`。官方 apk 脚本有同款判定，换中文包前先核。
+- **拼音路线的模型读不出英文词**：lexicon 里只有拼音音节，译文里夹的 `API`/`JSON` 会被静默跳过（sherpa 日志打 `Ignore OOV`），用户只会以为译文本身有问题。本地翻译插件的译文常混英文术语，**中文包优先选 espeak 路线**。
+- **espeak-ng 在 Windows 上读不了非 ASCII 路径**（UTF-8 进 ANSI fopen 全乱）→ 语音子进程 cwd 固定为 voices 根目录，spec 里全部用相对路径。
+- **Electron 给内嵌 Node 打了禁用 napi 外部缓冲区的补丁**（`ELECTRON_RUN_AS_NODE` 也拦）→ 生成调用必须传 `enableExternalBuffer: false`，否则抛 `External buffers are not allowed`。
+- **语音包换代必须盖版本戳**：同一目录下新旧包的文件名往往一样，只按"模型文件存在"判断会误判已安装 → 装完写 `.pack` 记归档名，对不上即视为未安装（`voiceInstalled`）。
+- **首段切分决定首字延迟**（只由第一段长度决定）：无标点的长句必须补硬切——`splitByCommas` 遇不到逗号会原样返回，等于没切；**拉丁文硬切要退到空格**，否则 `Artificial` 被砍成 `Artifici`、`work` 被劈成 `w/ork`。
+- **别让翻译模型判语种**（2026-09 实测）：Hy-MT2 是翻译指令微调模型，问答姿势完全不认——试了 4 种问法（含官方 `# 任务目标` 句式）最好只有 4/8，多数情况它直接开始翻译正文。而翻译本身根本用不到源语言（发给模型的 prompt 只带目标语言），检测结果只影响界面显示 → 要提升准确率就上专门的检测库（ELD / franc），别再绕回模型。
+- 参考量级（fp32 档）：首块出声约 0.1 秒，长文 20~30 倍实时；引擎闲置回收窗口 30 分钟，`onPluginEnter` 要补预热，否则用户隔一阵回来正好撞上冷启动。
