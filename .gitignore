@@ -5,7 +5,8 @@ node_modules/
 .DS_Store
 dist/
 
-# 文档记录
+# 本地文档与 AI 协作规则（不随仓库上传：README 才是对外的）
+CLAUDE.md
 docs/
 
 # 大二进制（模型不入库）
