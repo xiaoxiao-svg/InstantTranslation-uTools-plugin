@@ -6,9 +6,9 @@
         <template v-if="engineData && engineData.target">
           <h3>首次使用需安装推理引擎（{{ engineData.target.label }}，{{ engineData.target.size }}）</h3>
           <p class="desc">引擎是本地翻译运行的核心，与模型一样只需安装一次；插件包因此不含引擎，可做到 KB 级体积，Win/Mac/Linux 三端通用。</p>
+          <!-- 主流程只留「下载引擎」；导入是下载失败时的兜底，收在下方折叠区里 -->
           <div class="cfg-actions">
             <button class="btn primary" :disabled="engineBusy" @click="installEngine">下载引擎</button>
-            <button class="btn ghost" :disabled="engineBusy" @click="importEngine">导入安装包</button>
           </div>
           <div v-if="engineBusy" class="progress">
             <div class="progress-bar"><div class="fill" :style="{width: engineDlPercent + '%'}"></div></div>
@@ -32,7 +32,8 @@
               <span class="link-txt" :title="r.url">{{ r.url }}</span>
               <button class="btn ghost sm" @click="copyLink(r.url)">复制</button>
             </div>
-            <p class="links-note">下载后回插件点「导入安装包」选该文件（.zip / .tar.gz）即可，无需手动解压。</p>
+            <p class="links-note">下载后点下方按钮选该文件（.zip / .tar.gz）即可，无需手动解压。</p>
+            <button class="btn ghost sm" :disabled="engineBusy" @click="importEngine">导入安装包</button>
           </template>
         </template>
         <template v-else>
@@ -53,7 +54,9 @@
       <!-- 标题栏固定在滚动区外：展开长链接列表时「返回」始终可点 -->
       <div class="cfg-head">
         <h3>选择翻译模型</h3>
-        <button v-if="canBack" class="btn ghost sm" @click="backToMain">返回</button>
+        <button v-if="canBack" class="btn ghost sm" @click="backToMain">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M15 5l-7 7 7 7"/></svg>返回
+        </button>
       </div>
       <div class="cfg cfg-model">
         <p class="desc">官方全家桶任选其一：1.8B 最快够用，7B 更强，30B-A3B 质量最佳。同一目录可存多个规格，之后在设置里随时切换。</p>
@@ -71,7 +74,6 @@
         </div>
         <div class="cfg-actions">
           <button class="btn ghost" @click="chooseDir">选择目录</button>
-          <button class="btn ghost" :disabled="importing" @click="importModel">导入模型文件</button>
           <button class="btn primary" :disabled="downloading || !pickId" @click="startDownload">
             {{ picked && picked.installed ? '启用所选模型' : '下载所选模型' }}
           </button>
@@ -95,7 +97,8 @@
               <span class="link-txt" :title="r.url">{{ r.url }}</span>
               <button class="btn ghost sm" @click="copyModelLink(r.url)">复制</button>
             </div>
-            <p class="links-note">下载完成后点「导入模型文件」选择该文件（{{ modelLinks.file }}），无需手动挪动目录。</p>
+            <p class="links-note">下载完成后点下方按钮选该文件（{{ modelLinks.file }}），无需手动挪动目录。</p>
+            <button class="btn ghost sm" :disabled="importing" @click="importModel">导入模型文件</button>
             <p v-if="copyHint" class="progress-text copy-hint">{{ copyHint }}</p>
           </template>
         </template>
@@ -121,7 +124,7 @@
           <span class="count">{{ input.length }}/5000</span>
         </div>
         <div class="row actions">
-          <select class="lang" v-model="srcLang" title="源语言">
+          <select class="lang" v-model="srcLang" title="源语言" @change="onLangChange('src')">
             <option value="auto">{{ autoLabel }}</option>
             <option v-for="l in LANGS" :key="l.code" :value="l.code">{{ l.name }}</option>
           </select>
@@ -167,7 +170,7 @@
           </div>
         </div>
         <div class="row actions">
-          <select class="lang" v-model="tgtLang" title="目标语言">
+          <select class="lang" v-model="tgtLang" title="目标语言" @change="onLangChange('tgt')">
             <option v-for="l in LANGS" :key="l.code" :value="l.code">{{ l.name }}</option>
           </select>
           <button class="btn ghost sm" :disabled="!result || result.startsWith('翻译失败')" @click="speak(result, tgtLang)">
@@ -220,9 +223,9 @@
                 <button v-for="s in ['日常','正式','简洁']" :key="s" :class="{on: cfg.style===s}" @click="setStyle(s)">{{ s }}</button>
               </div>
             </div>
-            <!-- 术语表：标题行与行业包按钮合并成一行，节省垂直空间（设置页要一屏放下不出滚动条） -->
+            <!-- 术语词典：标题行与行业包按钮合并成一行，节省垂直空间（设置页要一屏放下不出滚动条） -->
             <div class="term-head">
-              <span class="set-label">术语表</span>
+              <span class="set-label">术语词典</span>
               <span class="muted">每行一条 术语=译文</span>
               <span class="spacer"></span>
               <button
@@ -357,6 +360,14 @@ const isZh = (code) => code === 'zh' || code === 'zh-Hant' || code === 'yue'
 // ---- 语言自动检测（启发式，纯前端零依赖）----
 // 思路：独特文字系统直接判定 → 汉字简繁区分 → 阿拉伯/西里尔字母按特征字符细分 → 拉丁语种按书写特征猜，无线索默认英语。
 // 局限：意大利/荷兰/印尼/马来等无独特字符的拉丁语种会落到英语，需要时手动固定源语言。
+// 语种检测：按 Unicode 字符范围判断，零依赖零延迟。
+// 已知取舍：拉丁语系（英/法/德/西/葡/意…）共用一套字母，这里一律落到 'en'。
+//
+// 别再试着让本地 Hy-MT2 来判断语种（2026-09 实测过）：它是翻译指令微调的模型，
+// 问答姿势完全不认 —— 试了 4 种问法（含官方文档那种 "# 任务目标" 句式），最好也只有
+// 4/8，多数情况它直接动手翻译正文。而且翻译本身用不到源语言（发给模型的 prompt 只带
+// 目标语言，源语言由模型自己判断），检测结果只影响界面显示的语言名，不值得为它加
+// 0.6 秒延迟。真要提升准确率，上专门的检测库（ELD / franc），别绕回模型这条路。
 function detectLang(text) {
   const t = (text || '').trim()
   if (!t) return 'en'
@@ -373,7 +384,10 @@ function detectLang(text) {
   if (cnt(/[\u0590-\u05ff]/g) > 0) return 'he'
   if (cnt(/[\u0e00-\u0e7f]/g) > 0) return 'th'
   if (cnt(/[\u4e00-\u9fff]/g) > 0) {
-    if (has(/[語譯學國體機術醫點書還進遠動員愛樂萬與專業區歲舉覺聽廳寫頭馬鳥龍車貝見風飛購開關門島灣產豐廣]/)) return 'zh-Hant'
+    // 繁体特征字：出现任意一个就能断定是繁体（这些字的简体写法不同）。
+    // 表要尽量全 —— 漏一个字的代价就是把繁体误判成简体（2026-09 实测「今天天氣不錯」就栽了，
+    // 「氣」「錯」当时都不在表里）。按日常高频差异字铺开，宁多勿少。
+    if (has(/[們這來個說國會對時過學點電見車門馬鳥氣錯問題間關話語請謝東樂書買賣頭發體醫術華漢龍風飛義議讓認識與專業區歲舉覺聽廳寫灣產豐廣機萬愛員動進遠還經給統紅級約結絕綠線練組終億價僅從眾優幣師幫帶張開陽隊際陸陳險隨難雲響頁預領顧顯飯餓館駕騎驗鬥魚鮮鳴麗黃黨齊齒龜]/)) return 'zh-Hant'
     return 'zh'
   }
   if (cnt(/[\u0600-\u06ff\u0750-\u077f]/g) > 0) {
@@ -700,6 +714,22 @@ watch(srcLang, (v) => {
   persistCfg()
   if (v === 'auto' && input.value.trim()) autoLabel.value = `自动检测（${langName(detectLang(input.value))}）`
 })
+
+// 源与目标撞车时自动翻转对端 —— 翻译成同一种语言没有意义。
+// 只处理"改动的那一侧"触发的撞车：源选自动检测时不算撞车（真实语种要等翻译时才识别出来）。
+// 翻转规则与 translate() 里那段保持一致：中文 ↔ 英语，其余 → 中文，
+// 这样非中英语种撞车时也有个确定去向，不会出现两边都留在同一个语种上。
+// 只改 ref 就够，上面两个 watch 负责写回配置。
+function onLangChange(side) {
+  if (srcLang.value === 'auto') return
+  if (side === 'src') {
+    if (srcLang.value !== tgtLang.value) return
+    tgtLang.value = isZh(srcLang.value) ? 'en' : 'zh'
+  } else {
+    if (tgtLang.value !== srcLang.value) return
+    srcLang.value = isZh(tgtLang.value) ? 'en' : 'zh'
+  }
+}
 
 // ---- 设置 ----
 function persistCfg() { p.saveConfig(cfg) }
@@ -1394,6 +1424,9 @@ body {
 /* ---- 术语包（设置页一键添加） ---- */
 /* 标题行 + 行业包按钮同行：设置页垂直空间紧张，合并后省一行 */
 .term-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 40px; }
+/* 首列与 .set-row 对齐：那边的间距是 16px，这里 gap 给 8px（行业包按钮之间也用这个值，
+   不能直接改 gap），所以给标签补 8px —— 否则「每行一条 术语=译文」比上方按钮行靠左 8px */
+.term-head .set-label { margin-right: 8px; }
 .term-packs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .tp-hint { font-size: 12px; color: var(--faint); }
 .term-packs .btn.on { border-color: var(--blue); color: var(--blue); background: var(--model-on); font-weight: 600; }

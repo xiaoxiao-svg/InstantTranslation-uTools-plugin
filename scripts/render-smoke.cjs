@@ -84,6 +84,23 @@ import('file:///' + path.join(distAssets, bundle).replace(/\\/g, '/'))
     const text = app ? app.textContent : ''
     if (!html.trim()) errors.push('挂载后 #app 为空——组件没有渲染出来')
     if (!/翻译|朗读/.test(text)) errors.push('#app 内容不含预期文案，疑似白屏: ' + text.slice(0, 80))
+    // 语言联动：源/目标撞车时对端自动翻转。
+    // 这段同时验证 @change 与 v-model 的执行顺序 —— 若 v-model 后更新，处理函数读到的是旧值，联动会整个失效。
+    if (!errors.length) {
+      const tick = () => new Promise((r) => setTimeout(r, 0))
+      const sels = [...dom.window.document.querySelectorAll('select.lang')]
+      const srcSel = sels[0], tgtSel = sels[1]
+      if (!srcSel || !tgtSel) errors.push('主界面找不到语言下拉（select.lang）')
+      else {
+        const set = (el, v) => { el.value = v; el.dispatchEvent(new dom.window.Event('change', { bubbles: true })) }
+        set(srcSel, 'ja'); await tick()
+        if (tgtSel.value === 'ja') errors.push('源改成日语并未撞车，目标不该跟着变')
+        set(tgtSel, 'ja'); await tick()
+        if (srcSel.value === 'ja') errors.push('目标改成与源相同的语种时，源没有自动翻转')
+        set(tgtSel, 'zh'); await tick()
+        if (srcSel.value !== 'en') errors.push('目标改成中文撞车时，源应自动翻成英语，实际: ' + srcSel.value)
+      }
+    }
     // 模拟点开「设置」——语音区块（音色下拉/试听）是 2026-09-15 事故现场，必须真实渲染一遍
     if (!errors.length) {
       const btns = [...dom.window.document.querySelectorAll('button')]
