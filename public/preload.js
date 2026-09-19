@@ -3,16 +3,16 @@
  * 职责：
  *  1. 模型管理：多参数规格注册表（1.8B/7B/30B-A3B 官方 GGUF 档位，MODELS 一处维护），
  *     同一目录可共存多个规格，cfg.modelId 决定当前档位（缺省回落 1.8B Q4_K_M，老配置不变）；
- *     下载走系统浏览器（hf-mirror 直链），本地文件可导入（按文件名匹配档位）
- *  2. 推理引擎安装与升级（v0.4.0 起外置：用户按平台下载 llama.cpp 官方构建，
- *     插件自动解压到 userData/utools-hy-mt2/engine——插件包因此只含前端代码，KB 级）
- *  3. 管理本地 llama-server.exe 推理服务（官方 llama.cpp 构建，Vulkan/Metal/CPU 按平台）
+ *     应用内直下（ModelScope 直连优先，断点续传，download.js），导入本地文件为兜底
+ *  2. 推理引擎安装与升级（v0.4.0 起外置：应用内直下 llama.cpp 官方构建，
+ *     自动解压到 userData/utools-hy-mt2/engine——插件包因此只含前端代码，KB 级）
+ *  3. 管理本地 llama-server 推理服务（官方 llama.cpp 构建，Vulkan/Metal/CPU 按平台）
  *  4. 翻译请求转发（/v1/chat/completions，官方 prompt 模板）
  *
  * 引擎说明（v0.4.0 重构）：
  *  - 引擎不再内置插件包：llama.cpp 官方 nightly（固定版本，见 ENG_VERSION）打包为
  *    win-vulkan / win-cpu / macos-arm64 / macos-x64 / ubuntu-x64 等平台资产，
- *    三端首次使用按平台引导下载（ubrowser 一键下载 或 手动下载后导入压缩包）。
+ *    首次使用按平台应用内直下（download.js：镜像自动换源 + 断点续传；导入安装包为兜底）。
  *  - 已安装引擎由 engine/version.txt 标记版本，与 ENG_VERSION 不符时引导重装。
  *  - 安装后流程不变：服务进程常驻，闲置 5 分钟自动睡眠（内存 2.4GB→63MB），
  *    来请求自动唤醒（唤醒+首译实测 ~3.9s）。插件退出不杀进程。
@@ -22,7 +22,7 @@ const path = require('path')
 const fs = require('fs')
 const http = require('http')
 const { unpackArchive } = require('./engine-unpack.js')
-const { downloadFile } = require('./download.js')
+const { downloadFile, partPath } = require('./download.js')
 
 const FIXED_PORT = 18155
 const SLEEP_IDLE_SECONDS = 300 // 闲置 5 分钟自动睡眠（权重出内存）
@@ -120,8 +120,17 @@ function writeEngineError(msg) {
   } catch (e) { console.error('[hy-mt2] 写入错误日志失败:', e.message) }
 }
 
-// 引擎状态快照（UI 决定是否引导安装）
-function engineInfo() {
+// 引擎包下载源：镜像可用性会漂移（实测 gh-proxy.com 直出 CDN 且支持 Range 续传、ghfast.top 时好时坏），
+// 应用内直下按此顺序自动换源，手动链接也是这一份；官方直链殿后（需代理）
+function enginePkgUrls(t) {
+  const u = ENG_BASE + '/' + t.file
+  return [
+    { label: 'gh-proxy.com 加速（国内推荐）', url: 'https://gh-proxy.com/' + u },
+    { label: 'ghfast.top 加速', url: 'https://ghfast.top/' + u },
+    { label: 'GitHub 官方直链（需代理）', url: u },
+  ]
+}
+function engineInfo() { // 引擎状态快照（UI 决定是否引导安装）
   const key = engineTarget()
   const t = key ? ENG_PACKS[key] : null
   const dir = engineInstallDir()
@@ -133,12 +142,7 @@ function engineInfo() {
     installed, marker, engineDir: dir, platform: process.platform + '/' + process.arch,
     version: ENG_VERSION,
     target: t ? { key, label: t.label, exe: t.exe, size: t.size, url: ENG_BASE + '/' + t.file } : null,
-    // 引擎手动下载链接（官方直链需代理，国内建议用加速镜像；实测 ghfast.top 快于 gh-proxy）
-    mirrors: t ? [
-      { label: 'ghfast.top 加速（国内推荐）', url: 'https://ghfast.top/' + ENG_BASE + '/' + t.file },
-      { label: 'gh-proxy.com 加速', url: 'https://gh-proxy.com/' + ENG_BASE + '/' + t.file },
-      { label: 'GitHub 官方直链（需代理）', url: ENG_BASE + '/' + t.file },
-    ] : [],
+    mirrors: t ? enginePkgUrls(t) : [],
   }
 }
 
@@ -169,15 +173,38 @@ function installEngineArchive(archive, t, onPhase) {
   })
 }
 
-// 打开系统浏览器下载当前平台引擎（国内加速镜像优先，GitHub 直链国内不通）
-async function openEngineDownload() {
+// 引擎应用内直下：下载（镜像自动换源+断点续传）→ 魔数校验 → 复用安装逻辑解压换入；包不留存
+// 与模型一致的体验（免浏览器、免二次导入），也绕开了导入对话框与手动解压的整条路径
+let engineDlAbort = null
+async function downloadEngine(onProgress, onPhase) {
   const key = engineTarget()
   const t = key ? ENG_PACKS[key] : null
   if (!t) throw new Error('当前平台不受支持: ' + process.platform + '/' + process.arch)
-  const url = 'https://ghfast.top/' + ENG_BASE + '/' + t.file
-  await openExternal(url)
-  return { url, size: t.size }
+  const pkgDir = path.join(utools.getPath('userData'), 'utools-hy-mt2', 'engine-pkg')
+  const dest = path.join(pkgDir, t.file)
+  const token = engineDlAbort = { stop: false }
+  try {
+    fs.mkdirSync(pkgDir, { recursive: true })
+    // 上次已下好的完整包（下载成功但安装中断）直接复用，不重复下载
+    const cached = fs.existsSync(dest) && fs.statSync(dest).size > 5 * 1048576
+    if (!cached) {
+      onPhase && onPhase('下载引擎中...')
+      await downloadFile(enginePkgUrls(t).map((r) => r.url), dest, {
+        minSize: 5 * 1048576,
+        magic: /\.zip$/.test(t.file) ? 'PK\u0003\u0004' : '\u001f\u008b',
+        onProgress,
+        aborted: () => token.stop,
+      })
+    }
+    onPhase && onPhase('安装引擎中...')
+    await installEngineArchive(dest, t, onPhase)
+    try { fs.rmSync(pkgDir, { recursive: true, force: true }) } catch {} // 10MB 级，无留存价值
+    return engineInfo()
+  } finally {
+    if (engineDlAbort === token) engineDlAbort = null
+  }
 }
+function cancelEngineDownload() { if (engineDlAbort) engineDlAbort.stop = true }
 
 // 用户手动下载后导入安装包
 function chooseEngineFile() {
@@ -185,9 +212,11 @@ function chooseEngineFile() {
     const r = utools.showOpenDialog({
       title: '选择下载好的引擎安装包（.zip 或 .tar.gz）',
       properties: ['openFile'],
+      // 单组并集：macOS 按 UTType 严格匹配且对多段扩展名（.tar.gz）有已知缺陷
+      // （electron#23316），拆组会导致 mac 默认组选不到 tar.gz；「全部文件」兜底
       filters: [
-        { name: '引擎安装包', extensions: ['zip', 'tgz'] },
-        { name: '压缩包', extensions: ['gz'] },
+        { name: '引擎安装包 (zip / tar.gz / tgz)', extensions: ['zip', 'gz', 'tgz'] },
+        { name: '全部文件', extensions: ['*'] },
       ],
     })
     resolve(r && r.length ? r[0] : null)
@@ -1081,7 +1110,8 @@ window.preload = {
   saveConfig: writeCfg,
   // 推理引擎（外置安装）：状态/浏览器下载/导入安装包/选择文件
   engineInfo,
-  openEngineDownload,
+  downloadEngine,
+  cancelEngineDownload,
   installEngineFromFile,
   chooseEngineFile,
   entryKeywords,
@@ -1100,11 +1130,31 @@ window.preload = {
     return { rows: modelUrls(m), file: m.file, size: m.size }
   },
   openModelDir(dir, id) { utools.showItemInFolder(modelPathIn(dir, modelById(id))) },
-  // 打开系统浏览器下载所选规格（ModelScope 国内直链；下载完成后点「导入模型文件」或重进插件自动检测）
-  async openModelDownload(id) {
+  // 应用内直下（ModelScope 国内直连 → hf-mirror → 官方站，断点续传）：完成即落正式文件名，无需再导入
+  // 单例：同一时间一个模型在下载；cancelModelDownload() 置停止标志，.part 保留供下次续传
+  modelDlAbort: null,
+  async downloadModel(dir, id, onProgress) {
     const m = modelById(id)
-    await openExternal(modelUrls(m)[0].url)
-    return { ok: true, file: m.file, size: m.size, url: modelUrls(m)[0].url }
+    if (!dir) throw new Error('请先选择模型存放目录')
+    const dest = modelPathIn(dir, m)
+    if (modelInstalled(dir, m)) return { file: m.file, size: fs.statSync(dest).size, done: true }
+    const token = this.modelDlAbort = { stop: false }
+    try {
+      const r = await downloadFile(modelUrls(m).map((u) => u.url), dest, {
+        minSize: 100 * 1024 * 1024, // 与 importModelFile 的完整阈值一致
+        magic: 'GGUF',
+        onProgress,
+        aborted: () => token.stop,
+      })
+      return { file: m.file, size: r.size, done: true }
+    } finally {
+      if (this.modelDlAbort === token) this.modelDlAbort = null
+    }
+  },
+  cancelModelDownload() { if (this.modelDlAbort) this.modelDlAbort.stop = true },
+  // 上次未完成的下载（.part 字节数，0 = 无）：进模型页时提示「继续下载」
+  modelPartInfo(dir, id) {
+    try { return fs.statSync(partPath(modelPathIn(dir, modelById(id)))).size } catch { return 0 }
   },
   // 手动下载的文件可能落在下载目录：选文件后拷入模型目录（按文件名匹配官方档位，大小写不敏感）
   chooseModelFile() {

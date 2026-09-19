@@ -11,17 +11,20 @@
             <button class="btn ghost" :disabled="engineBusy" @click="importEngine">导入安装包</button>
           </div>
           <div v-if="engineBusy" class="progress">
-            <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
-            <span class="progress-text">{{ engineStatus }}</span>
+            <div class="progress-bar"><div class="fill" :style="{width: engineDlPercent + '%'}"></div></div>
+            <div class="progress-row">
+              <span class="progress-text">{{ engineDlText }}</span>
+              <button class="btn ghost sm" @click="cancelEngineDownload">取消</button>
+            </div>
           </div>
           <p v-else-if="engineStatus" class="progress-text copy-hint">{{ engineStatus }}</p>
           <div v-if="engineError" class="err-box">
             <p class="err-title">引擎安装失败</p>
             <p class="err-msg">{{ engineError }}</p>
-            <p class="err-hint">用浏览器打开下方任一链接即可下载，下载完成后点"导入安装包"选择该文件；完整错误见 uTools 用户数据目录 utools-hy-mt2/last-engine-error.txt</p>
+            <p class="err-hint">可直接重试（进度已保留、自动续传）；仍失败时展开下方链接用浏览器下载，再点「导入安装包」。完整错误见 uTools 用户数据目录 utools-hy-mt2/last-engine-error.txt</p>
           </div>
           <button class="links-toggle" @click="showEngineLinks = !showEngineLinks">
-            {{ showEngineLinks ? '▾' : '▸' }} 浏览器下载打不开？用这里的手动链接
+            {{ showEngineLinks ? '▾' : '▸' }} 应用内下载失败？用浏览器下载这些链接，完成后点「导入安装包」
           </button>
           <template v-if="showEngineLinks">
             <div class="link-row" v-for="(r, i) in engineData.mirrors" :key="i">
@@ -75,13 +78,16 @@
           <span v-if="pickFile" class="path" :title="pickFile">{{ pickFile }}</span>
         </div>
         <div v-if="downloading" class="progress">
-          <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
-          <span class="progress-text">{{ progressText }}</span>
+          <div class="progress-bar"><div class="fill" :style="{width: dlPercent + '%'}"></div></div>
+          <div class="progress-row">
+            <span class="progress-text">{{ dlText }}</span>
+            <button class="btn ghost sm" @click="cancelDownload">取消</button>
+          </div>
         </div>
         <p v-else-if="progressText" class="progress-text">{{ progressText }}</p>
         <template v-if="modelLinks">
           <button class="links-toggle" @click="showModelLinks = !showModelLinks">
-            {{ showModelLinks ? '▾' : '▸' }} 浏览器下载打不开？用这里的手动链接
+            {{ showModelLinks ? '▾' : '▸' }} 应用内下载失败？用浏览器下载这些链接，完成后点「导入模型文件」
           </button>
           <template v-if="showModelLinks">
             <div class="link-row" v-for="(r, i) in modelLinks.rows" :key="i">
@@ -401,6 +407,8 @@ const modelReady = ref(false)
 const modelFailed = ref(false)
 const downloading = ref(false)
 const progressText = ref('')
+const dlPercent = ref(0) // 应用内下载进度（进度条百分比）
+const dlText = ref('') // 应用内下载进度文本（已下/总量 · 速度）
 // 多参数规格（preload MODELS 注册表驱动；cfg.modelId 指定当前档位，缺省回落 1.8B Q4_K_M）
 const models = ref([])
 const pickId = ref(cfg.modelId || '1.8b-q4')
@@ -427,6 +435,8 @@ const engineVersion = ref('')
 const engineBusy = ref(false)
 const engineStatus = ref('')
 const engineError = ref('')
+const engineDlPercent = ref(0) // 引擎应用内下载进度
+const engineDlText = ref('')
 const input = ref('')
 const result = ref('')
 const busy = ref(false)
@@ -909,9 +919,9 @@ async function preloadModel() {
 async function startDownload() {
   if (downloading.value || !pickId.value) return
   // 所选规格已装好 → 直接启用，无需下载
-  if (picked.value && picked.value.installed) return activateModel(pickId.value)
+  if (picked.value && picked.installed) return activateModel(pickId.value)
   if (!modelDir.value) {
-    // 与引擎一致：按钮随时可点；未选模型目录则先弹目录选择，选中后再开浏览器
+    // 与引擎一致：按钮随时可点；未选模型目录则先弹目录选择，选中后再开始下载
     const dir = await p.chooseModelDir()
     if (!dir) return
     modelDir.value = dir
@@ -922,15 +932,29 @@ async function startDownload() {
   cfg.modelId = pickId.value // 记住正在下载的规格：重进插件时 checkModel 检查的就是它
   await p.saveConfig(cfg)
   downloading.value = true
+  dlPercent.value = 0
+  dlText.value = '连接下载源...'
   try {
-    const r = await p.openModelDownload(pickId.value) // 系统浏览器下载（ModelScope 国内直链优先）
-    modelLinks.value = p.modelLinks(pickId.value)
-    progressText.value = '已在系统浏览器打开下载（' + (r.size || '') + '）。下载完成后点「导入模型文件」选择该文件，或重新进入插件自动识别'
+    // 应用内直下（ModelScope→hf-mirror→官方，断点续传），完成即自动激活
+    await p.downloadModel(modelDir.value, pickId.value, (pr) => {
+      dlPercent.value = pr.total ? Math.min(99, Math.floor(pr.received / pr.total * 100)) : 0
+      const mb = (n) => (n / 1048576).toFixed(1) + 'MB'
+      dlText.value = mb(pr.received) + (pr.total ? ' / ' + mb(pr.total) + '（' + dlPercent.value + '%）' : '')
+        + (pr.speed ? ' · ' + (pr.speed / 1048576).toFixed(1) + 'MB/s' : '')
+    })
+    refreshModels()
+    await activateModel(pickId.value)
   } catch (e) {
-    alert('无法打开浏览器: ' + e.message)
+    if (e.code === 'aborted') {
+      progressText.value = '已取消下载，进度已保留，下次点「下载所选模型」自动续传'
+    } else {
+      progressText.value = '下载失败: ' + e.message + '（进度已保留可重试；也可用下方链接浏览器下载后导入）'
+      modelLinks.value = p.modelLinks(pickId.value) // 失败时给出手动链接兜底
+    }
   }
   downloading.value = false
 }
+function cancelDownload() { p.cancelModelDownload() }
 // 激活所选规格（已装才可进）：切规格时停掉旧服务，新规格由预热按需拉起
 async function activateModel(id) {
   const switching = !!cfg.modelId && cfg.modelId !== id
@@ -975,6 +999,11 @@ function changeModel() {
   prevModelId.value = cfg.modelId // 记住进来前的规格：返回时恢复（下载新规格会改写 cfg.modelId）
   modelReady.value = false
   refreshModels()
+  // 上次下载没下完：提示点下载即自动续传
+  const part = modelDir.value ? p.modelPartInfo(modelDir.value, pickId.value) : 0
+  if (part > 0 && !p.modelExists(modelDir.value, pickId.value)) {
+    progressText.value = '上次下载未完成（已有 ' + (part / 1048576).toFixed(0) + 'MB），选好规格点「下载所选模型」自动续传'
+  }
 }
 function backToMain() {
   // 返回 = 放弃本次更换（含未完成的下载意图），恢复上次可用规格。
@@ -1019,22 +1048,47 @@ function initFlow() {
   })
 }
 async function installEngine() {
+  if (engineBusy.value) return
+  engineBusy.value = true
   engineError.value = ''
+  engineDlPercent.value = 0
+  engineDlText.value = '连接下载源...'
   try {
-    const r = await p.openEngineDownload()
-    engineStatus.value = '已调用系统浏览器打开下载页（' + (r.size || '') + '）。浏览器下载完成后点「导入安装包」选择该文件；官方链接打不开时，复制下方镜像链接到浏览器'
+    // 应用内直下（镜像自动换源+断点续传）→ 自动解压安装 → 完成
+    await p.downloadEngine((pr) => {
+      engineDlPercent.value = pr.total ? Math.min(99, Math.floor(pr.received / pr.total * 100)) : 0
+      const mb = (n) => (n / 1048576).toFixed(1) + 'MB'
+      engineDlText.value = mb(pr.received) + (pr.total ? ' / ' + mb(pr.total) + '（' + engineDlPercent.value + '%）' : '')
+        + (pr.speed ? ' · ' + (pr.speed / 1048576).toFixed(1) + 'MB/s' : '')
+    }, (phase) => {
+      if (phase === '安装引擎中...') engineDlPercent.value = 100
+      engineDlText.value = phase
+    })
+    engineStatus.value = ''
+    engineReady.value = true
+    initFlow()
   } catch (e) {
-    engineError.value = e.message
+    if (e.code === 'aborted') {
+      engineStatus.value = '已取消下载，进度已保留，再点「下载引擎」自动续传'
+    } else {
+      engineError.value = e.message
+    }
   }
+  engineBusy.value = false
 }
+function cancelEngineDownload() { p.cancelEngineDownload() }
 async function importEngine() {
   engineBusy.value = true
   engineError.value = ''
+  engineDlPercent.value = 0
   const f = await p.chooseEngineFile()
   if (!f) { engineBusy.value = false; return }
-  engineStatus.value = '解析安装包...'
+  engineDlText.value = '解析安装包...'
   try {
-    await p.installEngineFromFile(f, (phase) => { engineStatus.value = phase })
+    await p.installEngineFromFile(f, (phase) => {
+      engineDlPercent.value = 100
+      engineDlText.value = phase
+    })
     engineReady.value = true
     initFlow()
   } catch (e) {
@@ -1289,6 +1343,8 @@ body {
 .progress-bar { height: 6px; background: var(--progress-track); border-radius: 3px; overflow: hidden; }
 .fill { height: 100%; background: var(--blue); border-radius: 3px; transition: width .2s; }
 .progress-text { display: block; margin-top: 6px; font-size: 12px; color: var(--faint); }
+.progress .progress-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.progress .progress-row .progress-text { margin-top: 0; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 模型文件路径跟在按钮行内,单行超出省略号,不再单独占行撑高配置卡(否则与模型列表出双滚动条) */
 .cfg .path { flex: 1; min-width: 0; font-size: 12px; color: var(--faint); line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
