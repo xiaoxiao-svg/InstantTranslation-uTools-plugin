@@ -13,6 +13,12 @@ docs/
 *.gguf
 *.bin
 
+# 测试脚本（本地自测用，不上传；scripts/ 里只有构建链那两个入库）
+scripts/render-smoke.cjs
+scripts/tts-chain-smoke.cjs
+scripts/tts-perf.cjs
+scripts/tts-quant-bench.cjs
+
 # 测试残留
 tmp-*.js
 tmp-*.cjs
