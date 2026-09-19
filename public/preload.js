@@ -576,121 +576,130 @@ function chatTranslate(text, settings) {
 
 // ---- TTS 本地语音朗读（sherpa-onnx 原生运行时 + 语音包按需安装）----
 // 运行时外置下载：sherpa-onnx-node（原生 NAPI 绑定，onnxruntime CPU 多线程）+ 当前平台
-// 二进制包，npmmirror 直连；比旧 WASM 构建快数倍且支持多线程，Kokoro 82M 才跑得动。
+// 二进制包，npmmirror 直连；原生 NAPI 绑定能真多线程（WASM 版会把线程数压回 1）。
 // espeak-ng-data 各语音包内容完全相同 → 只存一份共享（省 17MB/包）。
 //
-// 音色选型（原生 fp32 实测，18 核机 / 8 线程；实时率 = 音频时长 ÷ 合成耗时）：
-//   Kokoro v1.1-zh    1.41x 实时（长文稳态） —— 103 音色（55 中文女声 + 45 中文男声 + 3 英语），
-//                                                质量同级开源最佳，作旗舰多语种包
-//   Matcha zh-en      2.85x 实时（WASM 时代实测，原生更快）—— 轻量中文备选（127MB）
-//   piper en/华燕     2.16x 实时 —— 轻量备选；韵律平但胜在小
-//   Kokoro int8       0.4x 实时（本机原生无 VNNI 内核，反比 fp32 慢 3 倍）—— 弃
-//   MeloTTS/Kokoro(WASM) ≤0.22x —— 旧 WASM 运行时的历史结论，随运行时换血作废
+// 音色选型：中英各一个 piper VITS medium 模型。Kokoro 348MB 那套已移除（合成慢，
+// 中文还会把句号念成 dot）。
+//
+// 用 fp32 原始档而非 int8 量化档，是实测结论不是随手选的：本机（无 AVX512-VNNI）上
+// int8 反而慢 5~8 倍 —— 小雅短句 int8 1015ms / fp32 115ms，长文 2.9x vs 26x 实时，
+// 模型加载也慢（664ms vs 134ms），与代码库里 Kokoro int8 那次翻车同源。
+// fp16 档应避免：加载即让 sherpa-onnx 原生模块崩溃（CPU 不支持）。
+// 拿体积换速度：58+64MB 仍不到 Kokoro 348MB 的一半。换机器部署前先跑
+// scripts/tts-quant-bench.cjs 复测，别照抄这个结论。
+//
+// 中文取名华燕而不是听起来更自然的小雅，是试听对比后的取舍：小雅走拼音词典音素化
+// （phoneme_type=pinyin），词典里只有拼音音节，译文里夹的英文词（API / JSON 这类，
+// 翻译场景高频）会被**静默跳过** —— sherpa 日志打 Ignore OOV，音频里少掉那几个词，
+// 用户完全听不出来是漏读，只会以为译文本身有问题。华燕走 espeak，中英混读正常。
+// 代价是中文听感比小雅平一些（espeak 音素化的通病）。
+//
+// 中文 piper 模型有两条互斥的音素化路线（照官方 apk 脚本的判定写）：
+//   xiao_ya / chaowen → lexicon.txt（拼音词典，g2pW 训练）+ phone/date/number.fst，不碰 espeak
+//   其余（huayan 等）  → espeak-ng-data，不传 lexicon
+// 配错路线的表现是出不了声或念成乱码，两者不能同时给，所以 spec 里 dataDir 与 lexicon 互斥。
 // 注意：espeak-ng 在 Windows 上打不开含中文的路径（UTF-8 进 ANSI fopen 全乱），
 // 语音服务子进程以 voices 为工作目录、所有引擎路径一律用相对路径规避。
 const TTS_REL_BASE = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
 const TTS_MIRROR_BASE = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models'
-const VOCODER_BASE = 'https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
-const VOCODER_MIRROR = 'https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models'
-// Kokoro 多语种包的 sid→名字对照（官方 fixed 表：sid 0~2 英/英音，3~57 中文女声，58~102 中文男声）
-const KOKORO_ZF = ['zf_001','zf_002','zf_003','zf_004','zf_005','zf_006','zf_007','zf_008','zf_017','zf_018','zf_019','zf_021','zf_022','zf_023','zf_024','zf_026','zf_027','zf_028','zf_032','zf_036','zf_038','zf_039','zf_040','zf_042','zf_043','zf_044','zf_046','zf_047','zf_048','zf_049','zf_051','zf_059','zf_060','zf_067','zf_070','zf_071','zf_072','zf_073','zf_074','zf_075','zf_076','zf_077','zf_078','zf_079','zf_083','zf_084','zf_085','zf_086','zf_087','zf_088','zf_090','zf_092','zf_093','zf_094','zf_099']
-const KOKORO_ZM = ['zm_009','zm_010','zm_011','zm_012','zm_013','zm_014','zm_015','zm_016','zm_020','zm_025','zm_029','zm_030','zm_031','zm_033','zm_034','zm_035','zm_037','zm_041','zm_045','zm_050','zm_052','zm_053','zm_054','zm_055','zm_056','zm_057','zm_058','zm_061','zm_062','zm_063','zm_064','zm_065','zm_066','zm_068','zm_069','zm_080','zm_081','zm_082','zm_089','zm_091','zm_095','zm_096','zm_097','zm_098','zm_100']
-const KOKORO_EN = ['af_maple','af_sol','bf_vale']
-function kokoroCatalog() {
-  const g = (names, start, group, label) => names.map((name, i) => ({ sid: start + i, name, group, label }))
-  return [
-    ...g(KOKORO_EN, 0, 'en', '英语'),
-    ...g(KOKORO_ZF, 3, 'zh-f', '中文女声'),
-    ...g(KOKORO_ZM, 58, 'zh-m', '中文男声'),
-  ]
-}
-// 各语言在 Kokoro 里的默认音色（zh → zf_001，en → af_maple）
-const KOKORO_DEFAULT_SID = { zh: 3, en: 0 }
 const VOICES = [
-  {
-    id: 'kokoro-v1_1', kind: 'kokoro', label: 'Kokoro 多语种', size: '348MB', flagship: true,
-    file: 'kokoro-multi-lang-v1_1.tar.bz2', dir: 'kokoro-multi-lang-v1_1', model: 'model.onnx',
-    lexicons: ['lexicon-zh.txt', 'lexicon-us-en.txt', 'lexicon-gb-en.txt'],
-    ruleFsts: ['phone-zh.fst', 'date-zh.fst', 'number-zh.fst'],
-  },
-  { id: 'en-amy', lang: 'en', kind: 'vits', label: '英语 · Amy 女声', size: '64MB',
-    file: 'vits-piper-en_US-amy-medium.tar.bz2', dir: 'vits-piper-en_US-amy-medium', model: 'en_US-amy-medium.onnx' },
-  { id: 'en-ryan', lang: 'en', kind: 'vits', label: '英语 · Ryan 男声', size: '64MB',
-    file: 'vits-piper-en_US-ryan-medium.tar.bz2', dir: 'vits-piper-en_US-ryan-medium', model: 'en_US-ryan-medium.onnx' },
-  { id: 'zh-matcha', lang: 'zh', kind: 'matcha', label: '中文 · 女声 自然', size: '127MB',
-    file: 'matcha-icefall-zh-en.tar.bz2', dir: 'matcha-icefall-zh-en', model: 'model-steps-3.onnx',
-    lexicon: 'lexicon.txt', ruleFsts: ['phone-zh.fst', 'date-zh.fst', 'number-zh.fst'],
-    // size 是总下载量：语音包 75MB + 声码器 51MB（装完自动下）
-    vocoder: { file: 'vocos-16khz-univ.onnx', size: '51MB' } },
+  // 中文 piper 走 espeak：包内自带 espeak-ng-data，安装时抽到共享 _espeak。
+  // 不传 lexicon —— 那是拼音路线才用的，给了会让 espeak 去音素化拼音 token（见上方说明）
   { id: 'zh-huayan', lang: 'zh', kind: 'vits', label: '中文 · 华燕 女声', size: '64MB',
-    file: 'vits-piper-zh_CN-huayan-medium.tar.bz2', dir: 'vits-piper-zh_CN-huayan-medium', model: 'zh_CN-huayan-medium.onnx' },
+    file: 'vits-piper-zh_CN-huayan-medium.tar.bz2',
+    dir: 'vits-piper-zh_CN-huayan-medium', model: 'zh_CN-huayan-medium.onnx' },
+  // 英文 piper 走 espeak：包内自带 espeak-ng-data，安装时抽到共享 _espeak
+  { id: 'en-amy', lang: 'en', kind: 'vits', label: '英语 · Amy 女声', size: '64MB',
+    file: 'vits-piper-en_US-amy-medium.tar.bz2',
+    dir: 'vits-piper-en_US-amy-medium', model: 'en_US-amy-medium.onnx' },
 ]
 function voicesRoot() { return path.join(utools.getPath('userData'), 'utools-hy-mt2', 'voices') }
 function espeakShared() { return path.join(voicesRoot(), '_espeak') }
 function voiceDirOf(id) { return path.join(voicesRoot(), id) }
 function voiceById(id) { return VOICES.find(v => v.id === id) }
-function vocoderPath(v) { return path.join(voicesRoot(), '_vocoder', path.basename(v.vocoder.file)) }
-// 装了模型还不够：kokoro 要 voices.bin + 包内私有 espeak 数据，matcha 架构必须连声码器一起就位
+// 装完盖戳：记下本目录装的是哪个归档，voiceInstalled 靠它识别"包已换代"（见该函数说明）。
+// 写不进去必须报出来 —— 吞掉的话下面 voiceInstalled 会判"未安装"，用户看到的是
+// "安装后未找到模型文件"，完全指错方向，还会白重下几十 MB。
+function writePackMark(v) {
+  try {
+    fs.writeFileSync(path.join(voiceDirOf(v.id), '.pack'), v.file)
+  } catch (e) {
+    throw new Error('语音包已解压，但版本标记写入失败（' + e.message + '）——请检查磁盘空间或目录权限后重试')
+  }
+}
+// 装了模型还不够：语音包会被换掉（如 fp32 换 int8 后包内文件名相同），用 .pack 记下装的是哪个
+// 归档，对不上就当未安装 —— 否则用户目录里躺着旧模型却被判成"已装好"，永远升不上去。
 function voiceInstalled(v) {
   try {
-    if (!fs.existsSync(path.join(voiceDirOf(v.id), v.model))) return false
-    if (v.kind === 'kokoro') {
-      if (!fs.existsSync(path.join(voiceDirOf(v.id), 'voices.bin'))) return false
-      if (!fs.existsSync(path.join(voiceDirOf(v.id), '_espeak', 'phontab'))) return false
-    }
-    if (v.vocoder && !fs.existsSync(vocoderPath(v))) return false
+    const dir = voiceDirOf(v.id)
+    if (!fs.existsSync(path.join(dir, v.model))) return false
+    if (fs.readFileSync(path.join(dir, '.pack'), 'utf8').trim() !== v.file) return false
+    // 走 espeak 路线的包（当前两个都是）还依赖共享 _espeak —— 那份数据被手工删掉后，
+    // 光看模型文件仍会判"已装"，用户遇到的是"显示装好了但朗读没声音"，查不出原因
+    if (!v.lexicon && !fs.existsSync(espeakShared())) return false
     return true
   } catch { return false }
 }
-// 引擎配置：vits / matcha / kokoro 字段不同，统一在这里拼，子进程只认 spec。
+// 引擎配置：子进程只认这份 spec。
 // 路径全部相对 voices 根目录 —— 语音服务子进程以该目录为 cwd（espeak-ng 在 Windows
 // 上读不了非 ASCII 路径，绝对路径里只要带中文用户名/桌面等就崩，相对路径天然避开）。
+// dataDir 与 lexicon 互斥：中文 piper 的拼音模型必须走 lexicon，给了 dataDir 会让 espeak
+// 去音素化拼音 token，结果是乱码或没声。
 function voiceSpec(v) {
   const d = v.id
-  const espeak = '_espeak'
-  const dataDir = fs.existsSync(path.join(voicesRoot(), espeak)) ? espeak : ''
-  if (v.kind === 'kokoro') {
-    return {
-      kind: 'kokoro',
-      model: d + '/' + v.model,
-      voices: d + '/voices.bin',
-      tokens: d + '/tokens.txt',
-      lexicon: (v.lexicons || []).map(f => d + '/' + f).join(','),
-      // espeak 用包内私有目录，不吃共享 _espeak：旧轻量包留下的可能是 7MB 子集，
-      // 安装时的"已存在跳过"会让 Kokoro 缺文件（它需要完整 17MB 版）
-      dataDir: d + '/_espeak',
-      ruleFsts: (v.ruleFsts || []).map(f => d + '/' + f).join(','),
-    }
+  return {
+    kind: 'vits',
+    model: d + '/' + v.model,
+    tokens: d + '/tokens.txt',
+    lexicon: v.lexicon ? d + '/' + v.lexicon : '',
+    dataDir: v.lexicon ? '' : (fs.existsSync(espeakShared()) ? '_espeak' : ''),
+    ruleFsts: (v.ruleFsts || []).map(f => d + '/' + f).join(','),
   }
-  if (v.kind === 'matcha') {
-    return {
-      kind: 'matcha',
-      acousticModel: d + '/' + v.model,
-      vocoder: '_vocoder/' + path.basename(v.vocoder.file),
-      lexicon: d + '/' + (v.lexicon || 'lexicon.txt'),
-      tokens: d + '/tokens.txt',
-      dataDir,
-      ruleFsts: (v.ruleFsts || []).map(f => d + '/' + f).join(','),
-    }
-  }
-  return { kind: 'vits', model: d + '/' + v.model, tokens: d + '/tokens.txt', dataDir }
 }
 function voicePackInfo() {
   return {
     voices: VOICES.map(v => ({ ...v, installed: voiceInstalled(v) })),
     espeakReady: fs.existsSync(espeakShared()),
     runtimeReady: ttsRuntimeReady(),
-    kokoroVoices: kokoroCatalog(),
-    kokoroDefaultSid: KOKORO_DEFAULT_SID,
+    legacy: legacyVoiceDirs(),
   }
 }
 function removeVoicePack(id) {
   fs.rmSync(voiceDirOf(id), { recursive: true, force: true })
-  // 最后一个语音包也删了就清共享 espeak 与声码器
-  if (!VOICES.some(voiceInstalled)) {
-    fs.rmSync(espeakShared(), { recursive: true, force: true })
-    fs.rmSync(path.join(voicesRoot(), '_vocoder'), { recursive: true, force: true })
+  // 最后一个语音包也删了就清共享 espeak
+  if (!VOICES.some(voiceInstalled)) fs.rmSync(espeakShared(), { recursive: true, force: true })
+}
+// 旧版本装过的包（Kokoro / Matcha / 小雅 / Ryan）已不在注册表里，目录留着白占几百 MB。
+// 只列出来交给设置页的清理按钮，不在安装流程里自动删 —— 删用户数据必须由用户点。
+function legacyVoiceDirs() {
+  try {
+    return fs.readdirSync(voicesRoot(), { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith('_') && !voiceById(e.name))
+      .map(e => ({ id: e.name, size: dirSize(path.join(voicesRoot(), e.name)) }))
+  } catch { return [] }
+}
+function dirSize(p) {
+  let n = 0
+  try {
+    for (const e of fs.readdirSync(p, { withFileTypes: true })) {
+      const f = path.join(p, e.name)
+      if (e.isDirectory()) n += dirSize(f)
+      else { try { n += fs.statSync(f).size } catch {} }
+    }
+  } catch {}
+  return n
+}
+function purgeLegacyVoices() {
+  const legacy = legacyVoiceDirs()
+  let freed = 0
+  for (const v of legacy) {
+    try { fs.rmSync(voiceDirOf(v.id), { recursive: true, force: true }); freed += v.size } catch {}
   }
+  // 声码器只有 Matcha 用，Matcha 已移除，一并清掉
+  const voc = path.join(voicesRoot(), '_vocoder')
+  try { if (fs.existsSync(voc)) { freed += dirSize(voc); fs.rmSync(voc, { recursive: true, force: true }) } } catch {}
+  return { removed: legacy.map(v => v.id), freed }
 }
 
 // ---- 语音合成子进程 ----
@@ -789,7 +798,7 @@ async function ttsCall(apiPath, body, timeoutMs) {
   return r.json
 }
 // 应用内下载（与模型/引擎同一套 download.js）：多镜像自动换源 + Range 断点续传 +
-// 背压 + 进度回调，Kokoro 这种 348MB 的大包中途断网也能接着下，不用从头来。
+// 背压 + 进度回调，中途断网也能接着下，不用从头来。
 // 返回 { cancel() }，界面可中断（.part 保留供下次续传）。
 function voiceDownload(urls, dest, onProgress) {
   let cancelled = false
@@ -882,56 +891,9 @@ async function downloadTtsRuntime(onPhase) {
   return true
 }
 
-async function installVoicePack(archivePath, onPhase) {
-  await ensureTtsRuntime(onPhase) // 解压语音包用的 wasm-bz2 就在运行时里
-  if (!fs.existsSync(archivePath)) {
-    const msg = '语音包文件不存在: ' + archivePath
-    writeTtsError(msg)
-    throw new Error(msg)
-  }
-  onPhase && onPhase('解压语音包中（约 10~30 秒）...')
-  // 语音包身份由归档顶层目录名决定，逐个匹配注册表
-  let voice = null
-  for (const v of VOICES) {
-    if (path.basename(archivePath).includes(v.dir.replace('vits-piper-', ''))) { voice = v; break }
-  }
-  // 文件名不可靠（用户可能重命名）→ 交给子进程按顶层目录判定，这里只传全部候选
-  const r = await ttsCall('/install', {
-    archive: archivePath,
-    targetDir: voice ? voiceDirOf(voice.id) : path.join(voicesRoot(), '_incoming'),
-    espeakDir: voice && voice.kind === 'kokoro' ? path.join(voiceDirOf(voice.id), '_espeak') : espeakShared(),
-    expectTop: voice ? voice.dir : '',
-  }, voice && voice.kind === 'kokoro' ? 600000 : 180000)
-  let id = voice ? voice.id : ''
-  if (!id) {
-    // 文件名没匹配上：用子进程返回的顶层目录反查
-    const v = VOICES.find(x => x.dir === r.topDir)
-    if (!v) { fs.rmSync(path.join(voicesRoot(), '_incoming'), { recursive: true, force: true }); throw new Error('不是支持的语音包（顶层目录 ' + r.topDir + '）') }
-    id = v.id
-    fs.rmSync(voiceDirOf(id), { recursive: true, force: true })
-    fs.renameSync(path.join(voicesRoot(), '_incoming'), voiceDirOf(id))
-  }
-  const vv = voiceById(id)
-  if (!vv) throw new Error('安装后未找到模型文件')
-  await ensureVocoder(vv, { onPhase })
-  if (!voiceInstalled(vv)) throw new Error('安装后未找到模型文件')
-  return { id, files: r.files }
-}
-// matcha 架构的附属文件（各包共用一份，装在 voices/_vocoder）
-async function ensureVocoder(vv, opts) {
-  const onPhase = opts && opts.onPhase
-  if (!vv.vocoder || fs.existsSync(vocoderPath(vv))) return
-  const vd = vv.vocoder
-  onPhase && onPhase('下载声码器（' + (vd.size || '') + '）...')
-  const dl = voiceDownload([VOCODER_BASE + '/' + vd.file, VOCODER_MIRROR + '/' + vd.file], vocoderPath(vv), (got, total) => {
-    if (onPhase) onPhase(`下载声码器 ${(got / 1048576).toFixed(1)}MB` + (total ? ' / ' + (total / 1048576).toFixed(1) + 'MB' : '') + '...')
-  })
-  await dl.promise
-}
-
 /**
- * 应用内下载并安装单个语音包（不跳浏览器、不需要用户找文件再导入）。
- * 下载（多镜像 + 断点续传）→ 解压 → （matcha）补声码器 → 校验，最后删掉压缩包只留解压产物。
+ * 应用内下载并安装单个语音包（全自动，用户不需要自己找文件）。
+ * 下载（多镜像 + 断点续传）→ 解压 → 盖 .pack 戳 → 校验，最后删掉压缩包只留解压产物。
  */
 async function downloadAndInstallVoice(id, opts) {
   const onPhase = opts && opts.onPhase
@@ -953,9 +915,9 @@ async function downloadAndInstallVoice(id, opts) {
     } else if (onPhase) {
       onPhase('发现上次未装完的下载，直接解压安装...')
     }
-    onPhase && onPhase('解压安装中（Kokoro 大包约 1~2 分钟，轻量包十几秒）...')
-    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: v.kind === 'kokoro' ? path.join(voiceDirOf(v.id), '_espeak') : espeakShared(), expectTop: v.dir }, 600000)
-    await ensureVocoder(v, { onPhase })
+    onPhase && onPhase('解压安装中（约十几秒）...')
+    const r = await ttsCall('/install', { archive: dest, targetDir: voiceDirOf(v.id), espeakDir: espeakShared(), expectTop: v.dir }, 180000)
+    writePackMark(v)
     if (!voiceInstalled(v)) throw new Error('安装后未找到模型文件')
     return { id, files: r.files }
   } finally {
@@ -963,9 +925,9 @@ async function downloadAndInstallVoice(id, opts) {
   }
 }
 
-// 一键启用 = 只装旗舰 Kokoro 多语种包（103 音色一次到位），已装的自动跳过。
-// 用户只按一次：运行时 + 语音包全程应用内下载，装完由渲染层自动选默认音色并预热。
-const VOICE_BUNDLE = ['kokoro-v1_1']
+// 一键启用 = 中英各装一个轻量包，已装的自动跳过。
+// 用户只按一次：运行时 + 两个语音包全程应用内下载，装完由渲染层自动选默认音色并预热。
+const VOICE_BUNDLE = ['zh-huayan', 'en-amy']
 async function installVoiceBundle(opts) {
   const installed = []
   for (let i = 0; i < VOICE_BUNDLE.length; i++) {
@@ -974,24 +936,19 @@ async function installVoiceBundle(opts) {
     if (voiceInstalled(v)) { installed.push(v.id); continue }
     const tag = VOICE_BUNDLE.length > 1 ? `（${i + 1}/${VOICE_BUNDLE.length}）` : ''
     const o = opts || {}
+    const n = VOICE_BUNDLE.length
     await downloadAndInstallVoice(v.id, {
       onPhase: (msg) => { if (o.onPhase) o.onPhase(tag + msg) },
-      onProgress: (got, total) => { if (o.onProgress) o.onProgress(got, total) },
+      // 折算成整批进度：onProgress 的 total 只是当前这个文件的大小，直接透传的话
+      // 第一个包走满 100%、第二个包又从 0 重来，进度条看着像卡了一下再重跑
+      onProgress: (got, total) => {
+        if (o.onProgress) o.onProgress(total ? Math.round((i + got / total) / n * 100) : 0, 100)
+      },
       getCancel: o.getCancel,
     })
     installed.push(v.id)
   }
   return { installed }
-}
-function chooseVoicePackFile() {
-  return new Promise((resolve) => {
-    const r = utools.showOpenDialog({
-      title: '选择下载好的语音包（.tar.bz2）',
-      properties: ['openFile'],
-      filters: [{ name: '语音包', extensions: ['bz2'] }],
-    })
-    resolve(r && r.length ? r[0] : null)
-  })
 }
 async function openVoicePackDownload(id) {
   const v = voiceById(id)
@@ -1000,7 +957,7 @@ async function openVoicePackDownload(id) {
   return { ok: true, file: v.file, size: v.size }
 }
 
-// 语音引用："包id" 或 "包id:sid"（kokoro 一包多音色，sid 选具体人）
+// 语音引用："包id" 或 "包id:sid"（sid 留给一包多音色的场景，当前两个包都是单说话人）
 function parseVoiceRef(ref) {
   const s = String(ref || '')
   const i = s.indexOf(':')
@@ -1101,7 +1058,7 @@ function ttsSpeakStream(text, voiceRef, handlers) {
 
   return { cancel }
 }
-// 预热：起服务并把已启用语音包的引擎先建好（原生 kokoro 首次约 3.5 秒）。
+// 预热：起服务并把已启用语音包的引擎先建好（不预热的话首次朗读要等模型加载）。
 // 入参可以是 "包id" 或 "包id:sid"（预热只到引擎加载，sid 不影响引擎键）。
 function ttsWarmup(voiceRefs) {
   const refs = Array.isArray(voiceRefs) && voiceRefs.length ? voiceRefs : VOICES.filter(voiceInstalled).map(v => v.id)
@@ -1219,11 +1176,10 @@ window.preload = {
   stopServer,
   // TTS 本地语音朗读：语音包列表/安装/卸载/合成/下载链接
   voicePackInfo,
-  chooseVoicePackFile,
-  installVoicePack,
   downloadAndInstallVoice,
   installVoiceBundle,
   removeVoicePack,
+  purgeLegacyVoices,
   openVoicePackDownload,
   ttsSynthesize,
   ttsSpeakStream,

@@ -232,70 +232,45 @@
               <button class="btn ghost sm" @click="changeModel">更换模型</button>
             </div>
 
-            <!-- 语音朗读（本地 TTS）：一键启用 = 运行时 + Kokoro 多语种包全自动装好；未装则回退系统 TTS -->
+            <!-- 语音朗读（本地 TTS）：一键启用 = 运行时 + 中英两个轻量语音包全自动装好；未装则回退系统 TTS -->
             <div class="set-row voice-head">
               <span class="set-label">朗读语音</span>
-              <span class="muted">Kokoro 103 音色（中文 100 · 英语 3）一次到位，全程应用内下载</span>
+              <span class="muted">中文华燕 · 英语 Amy，本地合成，全程应用内下载</span>
               <span class="spacer"></span>
-              <button v-if="!flagshipVoice || !flagshipVoice.installed" class="btn sm" :disabled="!!voiceBusy" @click="enableTts">{{ voiceBusy === 'kokoro' ? '启用中...' : '一键启用' }}</button>
-              <button class="btn ghost sm" :disabled="!!voiceBusy" @click="importVoice">导入语音包</button>
+              <!-- 旧包不再占一整行，收到这里；具体是哪些包放 title 里，鼠标悬停可见 -->
+              <button v-if="legacyVoices.length" class="btn ghost sm" :disabled="!!voiceBusy"
+                :title="'清理：' + legacyVoices.map(v => v.id).join('、')" @click="purgeLegacy"
+              >清理旧语音包</button>
+              <button v-if="!voicesAllReady" class="btn sm" :disabled="!!voiceBusy" @click="enableTts">{{ voiceBusy ? '启用中...' : '一键启用' }}</button>
             </div>
-            <div v-if="voiceBusy === 'kokoro' || voiceDl" class="progress">
-              <div class="progress-bar"><div class="fill" style="width:100%"></div></div>
+            <div v-if="voiceBusy || voiceDl" class="progress">
+              <div class="progress-bar"><div class="fill" :style="{ width: voicePercent + '%' }"></div></div>
               <span class="progress-text">{{ voiceStatus }}</span>
             </div>
-            <!-- 旗舰多语种包 -->
-            <div v-if="flagshipVoice" class="set-row voice-row">
-              <span class="voice-lang">多语种</span>
-              <span class="seg">
-                <button :class="{on: isKokoro('zh') || isKokoro('en')}" disabled title="Kokoro 多语种包">{{ flagshipVoice.installed ? 'Kokoro · 已就绪' : 'Kokoro · ' + flagshipVoice.size }}</button>
-              </span>
-              <span class="spacer"></span>
-              <button v-if="!flagshipVoice.installed" class="btn ghost sm" :disabled="!!voiceBusy" @click="downloadVoice(flagshipVoice.id)">下载</button>
-              <button v-else class="btn ghost sm" :disabled="!!voiceBusy" @click="removeVoice(flagshipVoice.id)">删除</button>
-            </div>
-            <!-- Kokoro 音色选择：装好后每个语言一个下拉 + 试听 -->
-            <template v-if="flagshipVoice && flagshipVoice.installed">
-              <div v-for="lang in ['zh', 'en']" :key="'kk' + lang" class="set-row voice-row">
-                <span class="voice-lang">└ {{ voiceLangLabel(lang) }}音色</span>
-                <select class="voice-select" :disabled="!isKokoro(lang)" :title="isKokoro(lang) ? '' : '先在下方把该语言切到 Kokoro'" :value="kokoroSidMap[lang]" @change="setKokoroSid(lang, $event.target.value)">
-                  <optgroup v-for="grp in kokoroGroups" :key="grp.key" :label="grp.label">
-                    <option v-for="o in grp.items" :key="o.sid" :value="o.sid">{{ o.name }}</option>
-                  </optgroup>
-                </select>
-                <button class="btn ghost sm" :disabled="!!previewBusy || !isKokoro(lang)" @click="previewKokoro(lang)">{{ previewBusy === lang ? '合成中...' : '试听' }}</button>
-              </div>
-            </template>
-            <!-- 轻量语音包（体积小、速度快；质量不如 Kokoro） -->
-            <div v-for="lang in ['en','zh']" :key="lang" class="set-row voice-row">
+            <!-- 每个语言一行：系统 / 已装音色 二选一，右侧是下载·试听·删除 -->
+            <div v-for="lang in ['zh','en']" :key="lang" class="set-row voice-row">
               <span class="voice-lang">{{ voiceLangLabel(lang) }}</span>
               <div class="seg">
                 <button :class="{on: !voicePackMap[lang]}" @click="setVoiceFor(lang, '')">系统</button>
                 <button
-                  v-if="flagshipVoice && flagshipVoice.installed"
-                  :class="{on: isKokoro(lang)}"
-                  @click="setVoiceFor(lang, flagshipVoice.id)"
-                >Kokoro</button>
-                <button
                   v-for="v in voiceOf(lang)" :key="v.id"
-                  :disabled="!v.installed" :title="v.installed ? '' : '未安装'"
+                  :disabled="!v.installed" :title="v.installed ? '' : '未安装，点右侧下载'"
                   :class="{on: voicePackMap[lang] === v.id}"
                   @click="setVoiceFor(lang, v.id)"
                 >{{ v.label.split('·')[1]?.trim() || v.label }}</button>
               </div>
               <span class="spacer"></span>
-              <button v-if="voiceOf(lang).length && !voiceOf(lang).some(v => v.installed)" class="btn ghost sm"
-                :disabled="!!voiceBusy" @click="downloadVoice(voiceOf(lang)[0].id)"
-              >下载（{{ voiceOf(lang)[0].size }}）</button>
-              <button v-else-if="voiceOf(lang).length > 1" class="btn ghost sm"
-                :disabled="!!voiceBusy"
-                @click="downloadVoice(voiceOf(lang).find(v => !v.installed)?.id || voiceOf(lang)[0].id)"
-              >换音色</button>
-              <button v-if="voiceOf(lang).some(v => v.installed)" class="btn ghost sm"
-                :disabled="!!voiceBusy" @click="removeVoice(voiceOf(lang).find(v => v.installed).id)"
-              >删除轻量包</button>
+              <template v-if="voiceOf(lang).length">
+                <button v-if="!voiceOf(lang).some(v => v.installed)" class="btn ghost sm"
+                  :disabled="!!voiceBusy" @click="downloadVoice(voiceOf(lang)[0].id)"
+                >下载（{{ voiceOf(lang)[0].size }}）</button>
+                <template v-else>
+                  <button class="btn ghost sm" :disabled="!!voiceBusy || previewBusy === lang" @click="previewVoice(lang)">{{ previewBusy === lang ? '合成中...' : '试听' }}</button>
+                  <button class="btn ghost sm" :disabled="!!voiceBusy" @click="removeVoice(voiceOf(lang).find(v => v.installed).id)">删除</button>
+                </template>
+              </template>
             </div>
-            <p v-if="voiceStatus && !(voiceBusy === 'kokoro' || voiceDl)" class="voice-hint">{{ voiceStatus }}</p>
+            <p v-if="voiceStatus && !voiceBusy && !voiceDl" class="voice-hint">{{ voiceStatus }}</p>
             <div v-if="voiceError" class="err-box">
               <p class="err-title">语音包操作失败</p>
               <p class="err-msg">{{ voiceError }}</p>
@@ -466,15 +441,31 @@ const termsText = ref(Object.keys(cfg.terms || {}).map(k => k + '=' + cfg.terms[
 // ---- 语音包（本地 TTS 朗读；按语言选用，未装则回退系统 TTS）----
 const voiceList = ref([])
 const voicePackMap = ref(Object.assign({ en: '', zh: '' }, cfg.voicePackMap || {})) // 语言 → 语音包 id
-const kokoroSidMap = ref(Object.assign({ zh: 3, en: 0 }, cfg.kokoroSid || {}))     // 语言 → Kokoro 音色 sid
-const kokoroVoices = ref([])      // Kokoro 全部音色（分组目录，来自 preload）
-const kokoroDefaultSid = ref({ zh: 3, en: 0 })
-const voiceEspeakReady = ref(false)
-const voiceBusy = ref('')        // 正在安装/卸载的语音包 id（'kokoro' = 一键启用进行中）
-const voiceDl = ref(false)       // 旗舰包下载进行中（决定进度条显示）
+const legacyVoices = ref([])     // 旧版本遗留的语音包目录（Kokoro/Matcha 等），等用户点清理
+const voiceBusy = ref('')        // 正在安装/卸载的语音包 id；非空即"忙碌中"
+const voiceDl = ref(false)       // 语音包下载进行中（决定进度条显示）
+const voicePercent = ref(0)      // 下载百分比，来自 preload 上报的字节数
 const previewBusy = ref('')      // 正在试听的语言
 const voiceStatus = ref('')
 const voiceError = ref('')
+
+// 校验历史配置：两种情况都要清掉引用 —— 包已不在注册表（换代移除），或包还在但本地没装
+// （换代后还没重下）。留着的话朗读会静默退回系统 TTS，界面上却仍高亮着那个音色，
+// 用户只会觉得"朗读坏了"，而且找不到原因
+function migrateVoiceCfg() {
+  const next = {}
+  let changed = false
+  for (const lang of ['zh', 'en']) {
+    const id = voicePackMap.value[lang]
+    if (id && !voiceList.value.some(v => v.id === id && v.installed)) { next[lang] = ''; changed = true }
+  }
+  if (changed) {
+    voicePackMap.value = Object.assign({}, voicePackMap.value, next)
+    cfg.voicePackMap = Object.assign({}, voicePackMap.value)
+    persistCfg()
+  }
+  delete cfg.kokoroSid // Kokoro 已移除，这个字段没用了
+}
 
 // ---- 历史记录（本地文件 userData/utools-hy-mt2/storage.json，经 preload 读写）----
 // ---- 历史记录（本地文件 userData/utools-hy-mt2/storage.json，经 preload 读写）----
@@ -526,16 +517,14 @@ function copyText(t) {
   flashStatus('已复制 ✓')
 }
 // ---- 朗读：本地语音包流式播放（边合成边出声），未安装/失败回退系统 TTS ----
-// 语音包按语言匹配：装了英语包就朗读英语、装了中文包就朗读中文；
-// Kokoro 一包多音色，sid 由 kokoroSidMap 按语言给出（引用形如 "kokoro-v1_1:34"）
+// 语音包按语言匹配：装了英语包就朗读英语、装了中文包就朗读中文（两个包都是单说话人）
 function localVoiceFor(langCode) {
   if (!langCode) return null
   const packId = voicePackMap.value[langCode]
   if (!packId) return null
   const v = voiceList.value.find(x => x.id === packId)
   if (!v || !v.installed) return null
-  const sid = v.kind === 'kokoro' ? (kokoroSidMap.value[langCode] ?? kokoroDefaultSid.value[langCode] ?? 0) : 0
-  return { v, sid, ref: v.id + ':' + sid }
+  return { v, sid: 0, ref: v.id }
 }
 
 // 播放走 Web Audio 而不是 <audio>：分段到达的音频要首尾相接不留缝，
@@ -735,25 +724,18 @@ watch(autoCopy, (v) => { cfg.autoCopy = v; persistCfg() })
 watch(tgtLang, (v) => { cfg.tgtLang = v; persistCfg() })
 
 // ---- 语音包管理（本地 TTS 朗读；模型按需下载，espeak 数据各包共享只存一份）----
-const flagshipVoice = computed(() => voiceList.value.find(v => v.flagship))
-const kokoroGroups = computed(() => {
-  const order = [['en', '英语'], ['zh-f', '中文女声'], ['zh-m', '中文男声']]
-  return order.map(([key, label]) => ({
-    key, label,
-    items: kokoroVoices.value.filter(o => o.group === key),
-  })).filter(g => g.items.length)
-})
-function isKokoro(lang) { return voicePackMap.value[lang] === 'kokoro-v1_1' }
-// 某语言的轻量语音包列表（旗舰 Kokoro 不进这个列表，它有自己的音色选择器）
+// 某语言的语音包列表
 function voiceOf(lang) { return voiceList.value.filter(v => v.lang === lang) }
+// 中英都有装好的包 = 一键启用按钮可以收起来
+const voicesAllReady = computed(() => ['zh', 'en'].every(l => voiceOf(l).some(v => v.installed)))
+const mbText = (n) => (n / 1048576).toFixed(0) + 'MB'
 function refreshVoices() {
   try {
     const info = p.voicePackInfo ? p.voicePackInfo() : { voices: [] }
     voiceList.value = info.voices || []
-    voiceEspeakReady.value = !!info.espeakReady
-    kokoroVoices.value = info.kokoroVoices || []
-    if (info.kokoroDefaultSid) kokoroDefaultSid.value = info.kokoroDefaultSid
-    // 后台预热已启用的语音包（原生引擎加载 ~3.5s，预热后点朗读即出音）
+    legacyVoices.value = info.legacy || []
+    migrateVoiceCfg()
+    // 后台预热已启用的语音包（引擎加载要时间，预热后点朗读即出音）
     if (p.ttsWarmup) {
       const ids = Object.values(voicePackMap.value).filter(Boolean)
       if (ids.length) setTimeout(() => { try { p.ttsWarmup(ids) } catch {} }, 1500)
@@ -768,85 +750,76 @@ function setVoiceFor(lang, id) {
   // 切换到某个语音包时立即预热，避免首次朗读等引擎加载
   if (id && p.ttsWarmup) setTimeout(() => { try { p.ttsWarmup([id]) } catch {} }, 100)
 }
-function setKokoroSid(lang, sid) {
-  kokoroSidMap.value = Object.assign({}, kokoroSidMap.value, { [lang]: Number(sid) || 0 })
-  cfg.kokoroSid = Object.assign({}, kokoroSidMap.value)
-  persistCfg()
-}
-// 一键启用：运行时 + Kokoro 旗舰包全自动（下载断点续传 → 解压 → 默认音色 → 预热），
+// 一键启用：运行时 + 中英两个轻量包全自动（断点续传 → 解压 → 校验 → 选默认 → 预热），
 // 用户只按一次，其余全是插件自己完成 —— "几乎无感"就指这条路。
 async function enableTts() {
   voiceError.value = ''
-  voiceBusy.value = 'kokoro'
+  voiceBusy.value = 'bundle'
   voiceDl.value = true
+  voicePercent.value = 0
   voiceStatus.value = '准备安装...'
   try {
-    const r = await p.installVoiceBundle({
+    await p.installVoiceBundle({
       onPhase: (phase) => { voiceStatus.value = phase },
+      onProgress: (got, total) => { if (total) voicePercent.value = Math.min(99, Math.round(got / total * 100)) },
     })
     refreshVoices()
-    // 装完即用：中英都切到 Kokoro（不动用户已明确选过的轻量包），预热线程随后就位
+    // 装完即用：该语言还没选过语音包就自动切过去
     for (const lang of ['zh', 'en']) {
-      if (!voicePackMap.value[lang]) setVoiceFor(lang, 'kokoro-v1_1')
+      if (!voicePackMap.value[lang]) {
+        const v = voiceOf(lang).find(x => x.installed)
+        if (v) setVoiceFor(lang, v.id)
+      }
     }
-    voiceStatus.value = '语音朗读已启用（Kokoro 多语种）✓'
+    voicePercent.value = 100
+    voiceStatus.value = '语音朗读已启用 ✓'
   } catch (e) { voiceError.value = e.message }
   voiceDl.value = false
   voiceBusy.value = ''
 }
-// 轻量包/旗舰包单独下载安装（下载→解压→补声码器一条龙，不跳浏览器）
+// 单个语音包下载安装（下载→解压→盖戳，不跳浏览器）
 async function downloadVoice(id) {
   voiceError.value = ''
   voiceBusy.value = id
-  const isFlagship = id === 'kokoro-v1_1'
-  if (isFlagship) voiceDl.value = true
+  voiceDl.value = true
+  voicePercent.value = 0
   try {
     await p.downloadAndInstallVoice(id, {
       onPhase: (phase) => { voiceStatus.value = phase },
+      onProgress: (got, total) => { if (total) voicePercent.value = Math.min(99, Math.round(got / total * 100)) },
     })
+    voicePercent.value = 100
     voiceStatus.value = '安装完成 ✓'
     refreshVoices()
     const v = voiceList.value.find(x => x.id === id)
     if (v && v.lang && !voicePackMap.value[v.lang]) setVoiceFor(v.lang, v.id)
-    if (isFlagship) {
-      for (const lang of ['zh', 'en']) {
-        if (!voicePackMap.value[lang]) setVoiceFor(lang, 'kokoro-v1_1')
-      }
-    }
   } catch (e) { voiceError.value = e.message }
-  if (isFlagship) voiceDl.value = false
+  voiceDl.value = false
   voiceBusy.value = ''
 }
-// Kokoro 音色试听：合成一句固定台词，走同一套 Web Audio 队列播放
-async function previewKokoro(lang) {
+// 音色试听：合成一句固定台词（中英各一句），走同一套 Web Audio 队列播放
+async function previewVoice(lang) {
   if (previewBusy.value) return
-  const sid = Number(kokoroSidMap.value[lang]) || 0
+  const v = voiceOf(lang).find(x => x.installed)
+  if (!v) return
   previewBusy.value = lang
   voiceError.value = ''
+  const line = lang === 'zh'
+    ? '你好，这是本地语音朗读的效果，不用联网也能读得很自然。'
+    : 'Hello, this is how the local voice sounds. It works entirely offline.'
   try {
     stopSpeaking()
-    const r = await p.ttsSynthesize('你好，这是我用本地语音朗读的声音，很荣幸为你读出每一段翻译。', 'kokoro-v1_1:' + sid)
+    const session = speakSession
+    const r = await p.ttsSynthesize(line, v.id)
+    // 合成期间用户可能已经点了正文朗读；这次试听的结果过期，塞进队列会跟正文叠着播
+    if (session !== speakSession) return
     if (!r.ok) throw new Error(r.reason || '合成失败')
     enqueueWav(r.wav, r.sampleRate)
-    voiceStatus.value = '试听中...'
+    // 不再往下方写"试听中..."：按钮自己会变成"合成中..."，下面再冒一行反而突兀
   } catch (e) { voiceError.value = e.message }
-  previewBusy.value = ''
-}
-async function importVoice() {
-  voiceBusy.value = 'import'
-  voiceError.value = ''
-  const f = await p.chooseVoicePackFile()
-  if (!f) { voiceBusy.value = ''; return }
-  voiceStatus.value = '解压安装中（大包需要十几秒）...'
-  try {
-    const r = await p.installVoicePack(f, (phase) => { voiceStatus.value = phase })
-    voiceStatus.value = '安装完成 ✓'
-    refreshVoices()
-    // 首次安装后自动启用（该语言还没选过语音包时）
-    const v = voiceList.value.find(x => x.id === r.id)
-    if (v && v.lang && !voicePackMap.value[v.lang]) setVoiceFor(v.lang, v.id)
-  } catch (e) { voiceError.value = e.message }
-  voiceBusy.value = ''
+  // 必须走 finally：上面那条 return 是"试听结果已过期"的早退路径，跳过复位的话
+  // previewBusy 会一直停着，按钮卡在"合成中..."，两个语言的试听全被锁死
+  finally { previewBusy.value = '' }
 }
 function removeVoice(id) {
   try {
@@ -859,6 +832,17 @@ function removeVoice(id) {
     persistCfg()
     refreshVoices()
     voiceStatus.value = '已删除'
+  } catch (e) { voiceError.value = e.message }
+}
+// 清理旧版本遗留的语音包目录（Kokoro / Matcha 等，动辄几百 MB）——
+// 只清不在注册表里的目录，当前在用的包不受影响
+function purgeLegacy() {
+  try {
+    const r = p.purgeLegacyVoices()
+    voiceStatus.value = r.removed.length
+      ? `已清理 ${r.removed.length} 个旧语音包，释放 ${mbText(r.freed)}`
+      : '没有可清理的旧语音包'
+    refreshVoices()
   } catch (e) { voiceError.value = e.message }
 }
 const voiceLangLabel = (l) => (l === 'en' ? '英语' : l === 'zh' ? '中文' : l)
@@ -1078,6 +1062,12 @@ const ENTRY_KEYWORDS = new Set((p.entryKeywords && p.entryKeywords()) || ['翻�
 try {
   utools.onPluginEnter(({ code, payload }) => {
     view.value = 'main'
+    // 语音子进程闲置 30 分钟会自退，uTools 后台保留页面又不会重跑模块顶层 —— 重进时补一次预热，
+    // 否则用户隔一阵回来点朗读，撞的是 2~3 秒的冷启动
+    if (p.ttsWarmup) {
+      const ids = Object.values(voicePackMap.value).filter(Boolean)
+      if (ids.length) setTimeout(() => { try { p.ttsWarmup(ids) } catch {} }, 300)
+    }
     let text = ''
     if (code === 'translate' && typeof payload === 'string') text = payload.trim()
     if (text && !ENTRY_KEYWORDS.has(text)) {
@@ -1263,17 +1253,6 @@ body {
 .voice-head .muted { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .voice-row { min-height: 40px; }
 .voice-lang { font-size: 12.5px; color: var(--sub); flex: none; width: 46px; }
-/* Kokoro 音色下拉：103 个音色按中文女/中文男/英语分组；表单控件必须显式给底色，
-   否则暗色下是系统默认白底（与滚动条同一套日夜约束） */
-.voice-select {
-  height: 30px; max-width: 220px; padding: 0 6px;
-  border: 1px solid var(--line); border-radius: 6px;
-  background: var(--card); color: var(--ink); font-size: 12.5px;
-}
-.voice-select:disabled { color: var(--disabled); background: var(--soft); cursor: not-allowed; }
-.voice-select:focus { outline: none; border-color: var(--hover-line); box-shadow: 0 0 0 3px var(--ring); }
-.voice-size { font-size: 11.5px; color: var(--faint); }
-.voice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
 .seg button:disabled { color: var(--disabled); cursor: not-allowed; }
 .path { font-size: 12px; color: var(--faint); word-break: break-all; line-height: 1.6; flex: 1; margin-right: 12px; }
 .footnote { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }

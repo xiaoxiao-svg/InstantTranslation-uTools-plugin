@@ -23,8 +23,7 @@
  *   POST /install {archive,targetDir,espeakDir,expectTop} → {ok, files, topDir}
  *   POST /extract {archive,destDir}    → {ok, files}（npm tgz：gunzip → tar，剥顶层 package/）
  *
- * spec 形如 { kind:'vits'|'matcha'|'kokoro', model|acousticModel, voices, vocoder, lexicon,
- *             tokens, dataDir, ruleFsts }（路径全部相对 voicesRoot）
+ * spec 形如 { kind:'vits', model, lexicon, tokens, dataDir, ruleFsts }（路径全部相对 voicesRoot）
  */
 const fs = require('fs')
 const http = require('http')
@@ -35,7 +34,9 @@ const os = require('os')
 const PORT = Number(process.argv[2]) || 18156
 const VOICES_ROOT = process.argv[3] || ''
 const RUNTIME_DIR = process.argv[5] || ''
-const IDLE_MS = 5 * 60 * 1000
+// 闲置回收窗口：小模型加载约 1 秒，但冷启动仍会让首次朗读"卡一下"。给足 30 分钟，
+// 覆盖"翻几句、隔一会儿再读"的正常节奏；真长时间不用才回收，不留常驻进程。
+const IDLE_MS = 30 * 60 * 1000
 
 // 惰性加载外置运行时（见头部说明）
 let sherpa = null
@@ -49,8 +50,8 @@ function getBzip2() {
   return Bzip2
 }
 
-// 原生 onnxruntime 走真多线程：8 线程实测 kokoro 长文稳态 1.4x 实时（4 线程只有 0.75x，
-// 16 线程过订阅反而掉到 0.5x），取一半物理核夹在 [4,8] 对各类机器都稳。
+// 原生 onnxruntime 走真多线程：实测线程数并非越多越快（超物理核后过订阅反而掉速），
+// 取一半物理核夹在 [4,8] 对各类机器都稳。
 const NUM_THREADS = Math.min(8, Math.max(4, os.cpus().length >> 1))
 
 const engines = {}
@@ -61,32 +62,20 @@ function touchIdle() {
 }
 touchIdle()
 
-// 引擎按 spec 缓存：同一语音包的多段合成复用同一个已加载模型（kokoro fp32 加载约 3.5 秒）
+// 引擎按 spec 缓存：同一语音包的多段合成复用同一个已加载模型。
+// lexicon / dataDir 决定音素化路线，换了就得重建引擎，所以一并进 key。
 function engineKey(spec) {
-  return [spec.kind, spec.model || spec.acousticModel, spec.voices || '', spec.vocoder || '', spec.lexicon || ''].join('|')
+  return [spec.kind, spec.model, spec.lexicon || '', spec.dataDir || ''].join('|')
 }
 function getEngine(spec) {
   const key = engineKey(spec)
   if (!engines[key]) {
     // numThreads / provider / debug 绑定层只在 model 这一层读（官方示例同款结构），
-    // 放进 vits/matcha/kokoro 小节会被静默忽略 —— 别再合错层
+    // 放进 vits 小节会被静默忽略 —— 别再合错层
     const base = { numThreads: NUM_THREADS, provider: 'cpu' }
     if (process.env.TTS_DEBUG) base.debug = 1 // 临时诊断开关
     const cfg = { maxNumSentences: 1, ruleFsts: spec.ruleFsts || '' }
-    if (spec.kind === 'kokoro') {
-      cfg.model = Object.assign({ kokoro: {
-        model: spec.model,
-        voices: spec.voices,
-        tokens: spec.tokens,
-        lexicon: spec.lexicon || '',
-        dataDir: spec.dataDir || '',
-        lengthScale: 1.0,
-      } }, base)
-    } else if (spec.kind === 'matcha') {
-      cfg.model = Object.assign({ matcha: { acousticModel: spec.acousticModel, vocoder: spec.vocoder, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' } }, base)
-    } else {
-      cfg.model = Object.assign({ vits: { model: spec.model, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' } }, base)
-    }
+    cfg.model = Object.assign({ vits: { model: spec.model, lexicon: spec.lexicon || '', tokens: spec.tokens, dataDir: spec.dataDir || '' } }, base)
     engines[key] = new (getSherpa().OfflineTts)(cfg)
   }
   return engines[key]
@@ -125,7 +114,9 @@ function floatToPcmBase64(samples) {
 const SEG_MAX = 42
 // 首段另给一个更小的上限：首字出声时间只由第一段决定，后面还有的是时间追上来，
 // 所以只把开头切细，后面的句子照旧保持完整。
-const SEG_HEAD_MAX = 14
+// 定 8 字是实测取舍：fp32 档下首块约 0.1 秒（整链路，见 scripts/tts-perf.cjs），
+// 再短出声更快但开头断得太碎；这个值只在"首段"生效，之后各段仍是 SEG_MAX。
+const SEG_HEAD_MAX = 8
 function splitByCommas(s, max) {
   const out = []
   let buf = ''
@@ -135,19 +126,52 @@ function splitByCommas(s, max) {
   if (buf) out.push(buf)
   return out
 }
+// 硬断的落点：中文没有词间空格，只能按字数断；拉丁文退到空格处，
+// 否则 "Artificial intelligence…" 会被砍成 "Artifici"、work 会被劈成 w/ork 念错。
+// cap 之内就有空格 → 切在那儿（首段不超 cap）；没有才往后找（最多到 cap*2）；
+// 单个词本身就比 cap*2 还长时只能硬切 —— 罕见，且没有更好的选择。
+// 注意别用 /^.*\s/ 一把贪到底：那会取到最远的空格，首段直接被撑到 2 倍 cap，
+// 首字延迟也就不再是 SEG_HEAD_MAX 说了算。
+function cutPointAt(s, cap) {
+  if (!/[a-zA-Z]/.test(s.slice(0, cap))) return cap
+  const inner = s.slice(0, cap).match(/^.*\s/)
+  if (inner) return inner[0].length
+  const outer = s.slice(cap, cap * 2).match(/^\S*\s/)
+  return outer ? cap + outer[0].length : cap
+}
+// 超长段按长度切（切点避开单词内部）
+function splitByLength(s, max) {
+  const out = []
+  let rest = s
+  while (rest.length > max) {
+    const cut = cutPointAt(rest, max)
+    out.push(rest.slice(0, cut))
+    rest = rest.slice(cut)
+  }
+  if (rest) out.push(rest)
+  return out
+}
 function splitSegments(text, maxLen, headMaxLen) {
   const max = maxLen || SEG_MAX
   const head = headMaxLen || SEG_HEAD_MAX
   const raw = String(text || '').trim()
   if (!raw) return []
   const out = []
-  const sentences = raw.split(/(?<=[。！？!?；;…\n])/).map((s) => s.trim()).filter(Boolean)
+  // 英文句末的 "." 也要能分句，否则整段英文只有一句（中文标点集合里没有 .）。
+  // 用 ". "（点+空白）而不是 "."，避免把 3.14、U.S.A 这类切开。
+  const sentences = raw.split(/(?<=[。！？!?；;…\n])|(?<=\.\s)/).map((s) => s.trim()).filter(Boolean)
   for (let i = 0; i < sentences.length; i++) {
     const cap = i === 0 ? head : max
-    const parts = sentences[i].length <= cap ? [sentences[i]] : splitByCommas(sentences[i], cap)
+    let parts = sentences[i].length <= cap ? [sentences[i]] : splitByCommas(sentences[i], cap)
+    // splitByCommas 只认逗号，整句没标点时会把原句整段返回，首段等于没切 —— 补一次硬切，
+    // 否则"人工智能正在改变我们的生活方式。"这种 16 字无逗号句会把首字延迟翻倍
+    if (i === 0 && parts[0].length > cap) {
+      const cut = cutPointAt(parts[0], cap)
+      parts = [parts[0].slice(0, cut), parts[0].slice(cut)].concat(parts.slice(1))
+    }
     for (const p of parts) {
       if (p.length <= max * 2) out.push(p)
-      else for (let k = 0; k < p.length; k += max) out.push(p.slice(k, k + max))
+      else out.push(...splitByLength(p, max))
     }
   }
   return out
