@@ -1171,7 +1171,7 @@ try {
   color-scheme: light;
   --blue: #4a6bfb; --blue-d: #3f5ef0;
   --ink: #1f2329; --sub: #6b7280; --faint: #9ca3af; --disabled: #c0c4cc;
-  --bg: #f4f4f4; --card: #fff; --soft: #f5f6f8;
+  --bg: transparent; --card: #fff; --soft: #f5f6f8;
   --line: #e4e7ed; --line-soft: #f0f2f5;
   --hover: #fafbfc; --hover-line: #c6cbd4;
   --btn-ghost: #4e5969; --placeholder: #a8abb2;
@@ -1189,7 +1189,7 @@ try {
   :root {
     color-scheme: dark;
     --ink: #e6e8eb; --sub: #a1a7b0; --faint: #7d8592; --disabled: #565b64;
-    --bg: #1e2023; --card: #2a2d31; --soft: #24272b;
+    --bg: transparent; --card: #2a2d31; --soft: #24272b;
     --line: #3f434a; --line-soft: #353940;
     --hover: #31353b; --hover-line: #565b64;
     --btn-ghost: #c6cbd3; --placeholder: #5f6470;
